@@ -270,11 +270,12 @@ Supporting PDFs also include `supporting_index` and primary-paper metadata.
 
 ## Supporting PDF Rules
 
-A PDF is treated as supporting material only when all of these are true:
+A PDF is treated as supporting material when all of these are true:
 
-1. The filename ends with `_1`, `_2`, and so on
-2. The corresponding main PDF exists in the same directory
-3. The converted text contains supporting-information markers near the start
+1. The converted markdown contains `supportinginformation` near the start after whitespace and punctuation are normalized
+2. A main PDF with a matching name can be found in the same directory
+
+Numeric suffixes such as `_1` and `_2` are still supported for indexing, but they are no longer required for supporting detection.
 
 Otherwise it is treated as a standalone paper.
 

@@ -272,9 +272,10 @@ supporting PDF 还会写入 `supporting_index` 以及主论文相关字段。
 
 一个 PDF 会被识别为 supporting material，当且仅当：
 
-1. 文件名以 `_1`、`_2` 等结尾
-2. 同目录下存在对应主 PDF
-3. 转换后的文本开头包含 supporting 相关关键词
+1. 转换后的 markdown 开头在去掉空白和标点后能命中 `supportinginformation`
+2. 同目录下能找到名称匹配的主 PDF
+
+像 `_1`、`_2` 这样的数字后缀仍然会用于排序和命名，但不再是识别 supporting 的前提条件。
 
 否则它会被当作独立论文处理。
 

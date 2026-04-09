@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -60,11 +61,7 @@ except ImportError:
         write_frontmatter_markdown,
     )
 
-SUPPORTING_CONTENT_MARKERS = (
-    "supporting information",
-    "supplementary information",
-    "supplemental information",
-)
+SUPPORTING_CONTENT_MARKER = "supportinginformation"
 
 
 class ManifestStore:
@@ -334,7 +331,8 @@ def build_conversion_metadata(
 
 def looks_like_supporting_markdown(markdown_path: Path) -> bool:
     lead_text = markdown_path.read_text(encoding="utf-8", errors="replace")[:4000].lower()
-    return any(marker in lead_text for marker in SUPPORTING_CONTENT_MARKERS)
+    normalized_text = re.sub(r"[^0-9a-z]+", "", lead_text)
+    return SUPPORTING_CONTENT_MARKER in normalized_text
 
 
 def remove_primary_bundle_content(bundle_dir: Path, allowed_root: Path) -> None:

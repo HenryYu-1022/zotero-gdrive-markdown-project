@@ -180,7 +180,11 @@ def pdf_bundle_relpath(rel_pdf_path: Path) -> Path:
     return rel_pdf_path.with_suffix("")
 
 
-def supporting_source_info(pdf_path: Path) -> tuple[Path, int] | None:
+def _normalize_pdf_stem_key(stem: str) -> str:
+    return re.sub(r"[^0-9a-z]+", "", stem.lower())
+
+
+def _explicit_supporting_source_info(pdf_path: Path) -> tuple[Path, int] | None:
     match = SUPPORTING_SUFFIX_RE.fullmatch(pdf_path.stem)
     if not match:
         return None
@@ -190,6 +194,77 @@ def supporting_source_info(pdf_path: Path) -> tuple[Path, int] | None:
         return None
 
     return primary_pdf, int(match.group("index"))
+
+
+def _iter_sibling_pdfs(pdf_path: Path) -> list[Path]:
+    return sorted(
+        path
+        for path in pdf_path.parent.iterdir()
+        if path.is_file() and path.suffix.lower() == pdf_path.suffix.lower()
+    )
+
+
+def _supporting_name_matches_primary(pdf_path: Path, primary_pdf: Path) -> bool:
+    if pdf_path == primary_pdf:
+        return False
+
+    explicit_info = _explicit_supporting_source_info(pdf_path)
+    if explicit_info and explicit_info[0] == primary_pdf:
+        return True
+
+    pdf_key = _normalize_pdf_stem_key(pdf_path.stem)
+    primary_key = _normalize_pdf_stem_key(primary_pdf.stem)
+    return bool(primary_key) and len(primary_key) < len(pdf_key) and primary_key in pdf_key
+
+
+def _supporting_sort_key(pdf_path: Path, primary_pdf: Path) -> tuple[int, int | str, str]:
+    explicit_info = _explicit_supporting_source_info(pdf_path)
+    if explicit_info and explicit_info[0] == primary_pdf:
+        return 0, explicit_info[1], pdf_path.name.lower()
+    return 1, _normalize_pdf_stem_key(pdf_path.stem), pdf_path.name.lower()
+
+
+def _supporting_index_for_primary(pdf_path: Path, primary_pdf: Path) -> int:
+    grouped_supporting = sorted(
+        (
+            sibling
+            for sibling in _iter_sibling_pdfs(pdf_path)
+            if _supporting_name_matches_primary(sibling, primary_pdf)
+        ),
+        key=lambda path: _supporting_sort_key(path, primary_pdf),
+    )
+    try:
+        return grouped_supporting.index(pdf_path) + 1
+    except ValueError:
+        return 1
+
+
+def supporting_source_info(pdf_path: Path) -> tuple[Path, int] | None:
+    explicit_info = _explicit_supporting_source_info(pdf_path)
+    if explicit_info:
+        return explicit_info
+
+    pdf_key = _normalize_pdf_stem_key(pdf_path.stem)
+    if not pdf_key:
+        return None
+
+    candidates: list[tuple[int, str, Path]] = []
+    for sibling in _iter_sibling_pdfs(pdf_path):
+        if sibling == pdf_path:
+            continue
+        sibling_key = _normalize_pdf_stem_key(sibling.stem)
+        if not sibling_key or len(sibling_key) >= len(pdf_key):
+            continue
+        if sibling_key not in pdf_key:
+            continue
+        candidates.append((len(sibling_key), sibling_key, sibling))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (-item[0], item[1], item[2].name.lower()))
+    primary_pdf = candidates[0][2]
+    return primary_pdf, _supporting_index_for_primary(pdf_path, primary_pdf)
 
 
 def supporting_markdown_name(index: int) -> str:
