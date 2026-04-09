@@ -1,4 +1,4 @@
-# paper-agent
+# Paper-agent
 
 English version: [README.markdown](README.markdown)
 
@@ -72,9 +72,12 @@ Copy-Item paper_to_markdown\settings.example.json paper_to_markdown\settings.jso
 
 ```jsonc
 {
+  "_comment_01": "这是标准 JSON，不能写 // 注释；模板里用 _comment_* 字段放说明，程序会忽略它们。",
+  "_comment_02": "macOS 只需要 python_path；pythonw_path 仅 Windows 使用。",
   "input_root": "/Users/yourname/Documents/paper-library/input",
   "output_root": "/Users/yourname/Documents/paper-library/output",
   "python_path": "/opt/homebrew/bin/python3",
+  "pythonw_path": "",
   "model_cache_dir": "/Users/yourname/.cache/marker/datalab_model_cache",
   "marker_cli": "/absolute/path/to/marker_single",
   "hf_home": "/Users/yourname/.cache/huggingface",
@@ -86,6 +89,8 @@ Copy-Item paper_to_markdown\settings.example.json paper_to_markdown\settings.jso
 
 - `marker_cli` 可以是绝对路径，也可以直接写 `marker_single`
 - `python_path` 最好写绝对路径，后台常驻时尤其重要
+- macOS 运行 LaunchAgent 时只读取 `python_path`，不读取 `pythonw_path`
+- `pythonw_path` 只给 Windows 后台计划任务用；如果你在 macOS，完全可以留空或不写
 - `torch_device` 一般是：NVIDIA 用 `cuda`，Apple Silicon 用 `mps`，无加速时用 `cpu`
 
 ### 2. 先下载一次 Marker 模型
@@ -289,8 +294,8 @@ supporting PDF 还会写入 `supporting_index` 以及主论文相关字段。
 | `output_root` | 是 | -- | Markdown、state、logs、raw 的输出根目录 |
 | `marker_cli` | 是 | -- | Marker 命令名或绝对路径，例如 `marker_single` |
 | `hf_home` | 是 | -- | Hugging Face 缓存目录 |
-| `python_path` | 否 | -- | macOS LaunchAgent 使用的 Python 路径，也可作为 Windows 回退值 |
-| `pythonw_path` | 否 | -- | Windows 后台任务优先使用的 `pythonw.exe` 路径 |
+| `python_path` | 否 | -- | macOS LaunchAgent 实际使用的 Python 路径，也可作为 Windows 回退值；建议写绝对路径 |
+| `pythonw_path` | 否 | -- | 仅 Windows 后台任务优先使用的 `pythonw.exe` 路径；macOS 不需要填，也不会读取这个字段 |
 | `marker_repo_root` | 否 | -- | 可选的 Marker 工作目录，仅特殊本地源码场景需要 |
 | `model_cache_dir` | 否 | -- | supervisor 会导出为 `MODEL_CACHE_DIR` |
 | `torch_device` | 否 | `cuda` | `cuda`、`mps` 或 `cpu` |
@@ -335,9 +340,11 @@ paper-agent/
 ## 说明
 
 - `settings.json` 是机器相关配置，已经加入 `.gitignore`
+- 模板 `settings.example.json` 开头的 `_comment_*` 字段是给人看的说明，保留也不会影响程序运行
 - `paper-agent` 不依赖 Google Drive，本地目录可直接使用
 - 如果你使用 `zotero-attanger`，把它导出的 PDF 根目录填到 `input_root` 即可
-- macOS LaunchAgent 不继承你交互 shell 的 PATH，所以 `python_path` 最好写绝对路径
+- macOS LaunchAgent 不继承你交互 shell 的 PATH，而且脚本只读取 `python_path`，所以这个字段最好写绝对路径
+- Windows 后台任务会优先读 `pythonw_path`；如果没填，再回退到 `python_path`
 
 ## 许可证
 

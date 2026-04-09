@@ -1,4 +1,4 @@
-# paper-agent
+# Paper-agent
 
 中文说明见 [README.zh-CN.markdown](README.zh-CN.markdown)。
 
