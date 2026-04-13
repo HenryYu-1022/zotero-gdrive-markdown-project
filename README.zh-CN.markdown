@@ -323,6 +323,12 @@ zsh ./watch_autostart.sh status
 zsh ./watch_autostart.sh remove
 ```
 
+macOS 这里用的是当前用户的 LaunchAgent，一般不要加 `sudo`，直接运行即可：
+
+```bash
+zsh ./watch_autostart.sh install
+```
+
 - `watch_autostart.sh`：统一的安装 / 卸载 / 状态查看入口
 - 它底层会调用 `install_or_update_launch_agent.sh` 和 `remove_launch_agent.sh`
 - supervisor：`paper_agent_watch_supervisor.sh`
@@ -336,6 +342,12 @@ zsh ./watch_autostart.sh remove
 powershell -NoProfile -ExecutionPolicy Bypass -File .\watch_autostart.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\watch_autostart.ps1 -Action status
 powershell -NoProfile -ExecutionPolicy Bypass -File .\watch_autostart.ps1 -Action remove
+```
+
+如果你是从普通 PowerShell 里想直接提权成管理员再运行安装命令，可以用这一行：
+
+```powershell
+Start-Process powershell -Verb RunAs -WorkingDirectory $PWD -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File .\watch_autostart.ps1'
 ```
 
 - `watch_autostart.ps1`：统一的安装 / 卸载 / 状态查看入口

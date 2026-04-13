@@ -318,6 +318,12 @@ zsh ./watch_autostart.sh status
 zsh ./watch_autostart.sh remove
 ```
 
+macOS uses a per-user LaunchAgent here, so normally you should run it without `sudo`:
+
+```bash
+zsh ./watch_autostart.sh install
+```
+
 - `watch_autostart.sh`: unified install/remove/status entrypoint
 - Under the hood it calls `install_or_update_launch_agent.sh` and `remove_launch_agent.sh`
 - Supervisor: `paper_agent_watch_supervisor.sh`
@@ -331,6 +337,12 @@ zsh ./watch_autostart.sh remove
 powershell -NoProfile -ExecutionPolicy Bypass -File .\watch_autostart.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\watch_autostart.ps1 -Action status
 powershell -NoProfile -ExecutionPolicy Bypass -File .\watch_autostart.ps1 -Action remove
+```
+
+Run the install command as Administrator from a normal PowerShell session:
+
+```powershell
+Start-Process powershell -Verb RunAs -WorkingDirectory $PWD -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File .\watch_autostart.ps1'
 ```
 
 - `watch_autostart.ps1`: unified install/remove/status entrypoint
