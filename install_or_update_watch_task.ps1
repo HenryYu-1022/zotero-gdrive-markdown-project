@@ -4,7 +4,23 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$ProjectRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+function Get-ProjectRoot {
+    if ($PSScriptRoot) {
+        return $PSScriptRoot
+    }
+
+    if ($PSCommandPath) {
+        return (Split-Path -Parent $PSCommandPath)
+    }
+
+    if ($MyInvocation.MyCommand.Path) {
+        return (Split-Path -Parent $MyInvocation.MyCommand.Path)
+    }
+
+    throw 'Unable to determine the script directory. Run this script from a saved .ps1 file.'
+}
+
+$ProjectRoot = Get-ProjectRoot
 $SupervisorPath = Join-Path $ProjectRoot 'paper_agent_watch_supervisor.ps1'
 
 if (-not (Test-Path -LiteralPath $SupervisorPath)) {
@@ -17,21 +33,26 @@ function Stop-PaperAgentWatchProcesses {
         'watch_folder_resilient.py'
     )
 
-    $targets = Get-CimInstance Win32_Process |
-        Where-Object {
-            $commandLine = $_.CommandLine
-            if (-not $commandLine) {
+    try {
+        $targets = Get-CimInstance Win32_Process -ErrorAction Stop |
+            Where-Object {
+                $commandLine = $_.CommandLine
+                if (-not $commandLine) {
+                    return $false
+                }
+
+                foreach ($pattern in $patterns) {
+                    if ($commandLine -like "*$pattern*") {
+                        return $true
+                    }
+                }
+
                 return $false
             }
-
-            foreach ($pattern in $patterns) {
-                if ($commandLine -like "*$pattern*") {
-                    return $true
-                }
-            }
-
-            return $false
-        }
+    } catch {
+        Write-Warning "Unable to enumerate existing watcher processes. Continuing without stopping them. $($_.Exception.Message)"
+        return
+    }
 
     foreach ($target in $targets) {
         try {
@@ -55,15 +76,20 @@ $action = New-ScheduledTaskAction `
     -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$SupervisorPath`""
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew
-$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+$currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+$principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Limited
 
-Register-ScheduledTask `
-    -TaskName $TaskName `
-    -Action $action `
-    -Trigger $trigger `
-    -Settings $settings `
-    -Principal $principal `
-    -Force | Out-Null
+try {
+    Register-ScheduledTask `
+        -TaskName $TaskName `
+        -Action $action `
+        -Trigger $trigger `
+        -Settings $settings `
+        -Principal $principal `
+        -Force | Out-Null
+} catch {
+    throw "Failed to register scheduled task '$TaskName'. Run PowerShell as Administrator and try again. $($_.Exception.Message)"
+}
 
 Start-ScheduledTask -TaskName $TaskName
 Get-ScheduledTask -TaskName $TaskName | Select-Object TaskName, State | Format-List

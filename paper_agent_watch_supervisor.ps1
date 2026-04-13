@@ -12,14 +12,14 @@ function Ensure-Path {
     param([string]$Path)
 
     if (-not (Test-Path -LiteralPath $Path)) {
-        New-Item -ItemType Directory -Path $Path -Force | Out-Null
+        New-Item -ItemType Directory -LiteralPath $Path -Force | Out-Null
     }
 }
 
 function Read-Config {
     param([string]$Path)
 
-    return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    return Get-Content -LiteralPath $Path -Encoding UTF8 -Raw | ConvertFrom-Json
 }
 
 $ProjectRoot = Get-ScriptRoot
@@ -57,8 +57,9 @@ function Write-Log {
         [string]$Level = 'INFO'
     )
 
+    Ensure-Path -Path $LogRoot
     $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    Add-Content -LiteralPath $SupervisorLogPath -Value "$timestamp | $Level | $Message"
+    Add-Content -LiteralPath $SupervisorLogPath -Encoding UTF8 -Value "$timestamp | $Level | $Message"
 }
 
 function Test-RequiredPaths {
@@ -73,6 +74,7 @@ function Test-RequiredPaths {
 function Save-WatcherState {
     param([System.Diagnostics.Process]$Process)
 
+    Ensure-Path -Path $LogRoot
     $state = @{
         pid = $Process.Id
         start_time = $Process.StartTime.ToString('o')
@@ -86,7 +88,7 @@ function Get-WatcherProcess {
     }
 
     try {
-        $state = Get-Content -LiteralPath $WatcherStatePath -Raw | ConvertFrom-Json
+        $state = Get-Content -LiteralPath $WatcherStatePath -Encoding UTF8 -Raw | ConvertFrom-Json
         $process = Get-Process -Id ([int]$state.pid) -ErrorAction Stop
         $savedStart = [datetime]::Parse($state.start_time)
         if ($process.StartTime -eq $savedStart) {
