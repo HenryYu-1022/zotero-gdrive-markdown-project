@@ -14,6 +14,24 @@ from typing import Any
 WORKFLOW_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = WORKFLOW_DIR / "settings.json"
 SUPPORTING_SUFFIX_RE = re.compile(r"^(?P<base>.+)_(?P<index>[1-9]\d*)$")
+MAIN_DUPLICATE_SUFFIX_RE = re.compile(r"^(?P<base>.+?)(?:[\s_-]+)(?P<index>[2-9]\d*)$")
+GENERIC_SUPPORTING_NAME_RE = re.compile(
+    r"^(?P<label>"
+    r"si|"
+    r"supporting|supportinginfo|supportinginformation|"
+    r"supplement|supplemental|supplementary|"
+    r"suppinfo|supinfo|"
+    r"supplementinfo|supplementinformation|"
+    r"supplementalinfo|supplementalinformation|"
+    r"supplementaryinfo|supplementaryinformation"
+    r")(?P<index>[1-9]\d*)?$"
+)
+SUPPORTING_LABEL_TOKEN_RE = re.compile(
+    r"(?:^|[\s_\-()]+)"
+    r"(?:si|supporting(?:\s+information|\s+info)?|supplement(?:ary|al)?(?:\s+information|\s+info)?)"
+    r"(?:[\s_\-()]+|$)",
+    re.IGNORECASE,
+)
 
 
 def _require_non_empty(config: dict[str, Any], field: str) -> str:
@@ -207,6 +225,21 @@ def _explicit_supporting_source_info(pdf_path: Path) -> tuple[Path, int] | None:
     return primary_pdf, int(match.group("index"))
 
 
+def _generic_supporting_name_index(pdf_path: Path) -> int | None:
+    match = GENERIC_SUPPORTING_NAME_RE.fullmatch(_normalize_pdf_stem_key(pdf_path.stem))
+    if not match:
+        return None
+
+    index_text = match.group("index")
+    if not index_text:
+        return 1
+    return int(index_text)
+
+
+def _has_supporting_label(stem: str) -> bool:
+    return SUPPORTING_LABEL_TOKEN_RE.search(stem) is not None
+
+
 def _iter_sibling_pdfs(pdf_path: Path) -> list[Path]:
     return sorted(
         path
@@ -223,6 +256,11 @@ def _supporting_name_matches_primary(pdf_path: Path, primary_pdf: Path) -> bool:
     if explicit_info and explicit_info[0] == primary_pdf:
         return True
 
+    if _generic_supporting_name_index(pdf_path) is not None:
+        return True
+    if not _has_supporting_label(pdf_path.stem):
+        return False
+
     pdf_key = _normalize_pdf_stem_key(pdf_path.stem)
     primary_key = _normalize_pdf_stem_key(primary_pdf.stem)
     return bool(primary_key) and len(primary_key) < len(pdf_key) and primary_key in pdf_key
@@ -233,6 +271,13 @@ def _supporting_sort_key(pdf_path: Path, primary_pdf: Path) -> tuple[int, int | 
     if explicit_info and explicit_info[0] == primary_pdf:
         return 0, explicit_info[1], pdf_path.name.lower()
     return 1, _normalize_pdf_stem_key(pdf_path.stem), pdf_path.name.lower()
+
+
+def _generic_supporting_sort_key(pdf_path: Path) -> tuple[int, str]:
+    index = _generic_supporting_name_index(pdf_path)
+    if index is None:
+        return 10**9, pdf_path.name.lower()
+    return index, pdf_path.name.lower()
 
 
 def _supporting_index_for_primary(pdf_path: Path, primary_pdf: Path) -> int:
@@ -250,10 +295,97 @@ def _supporting_index_for_primary(pdf_path: Path, primary_pdf: Path) -> int:
         return 1
 
 
+def _generic_supporting_source_info(pdf_path: Path) -> tuple[Path, int] | None:
+    generic_index = _generic_supporting_name_index(pdf_path)
+    if generic_index is None:
+        return None
+
+    primary_candidates = [
+        sibling
+        for sibling in _iter_sibling_pdfs(pdf_path)
+        if sibling != pdf_path
+        and _generic_supporting_name_index(sibling) is None
+        and _explicit_supporting_source_info(sibling) is None
+    ]
+    if len(primary_candidates) != 1:
+        return None
+
+    primary_pdf = primary_candidates[0]
+    generic_group = sorted(
+        (
+            sibling
+            for sibling in _iter_sibling_pdfs(pdf_path)
+            if _generic_supporting_name_index(sibling) is not None
+        ),
+        key=_generic_supporting_sort_key,
+    )
+    try:
+        return primary_pdf, generic_group.index(pdf_path) + 1
+    except ValueError:
+        return primary_pdf, generic_index
+
+
+def _explicit_main_duplicate_source_info(pdf_path: Path) -> tuple[Path, int] | None:
+    if _explicit_supporting_source_info(pdf_path) is not None:
+        return None
+    if _generic_supporting_name_index(pdf_path) is not None:
+        return None
+
+    match = MAIN_DUPLICATE_SUFFIX_RE.fullmatch(pdf_path.stem)
+    if not match:
+        return None
+
+    primary_pdf = pdf_path.with_name(match.group("base") + pdf_path.suffix)
+    if not primary_pdf.exists():
+        return None
+
+    return primary_pdf, int(match.group("index"))
+
+
+def _main_duplicate_sort_key(pdf_path: Path, primary_pdf: Path) -> tuple[int, int, str]:
+    if pdf_path == primary_pdf:
+        return 0, 0, pdf_path.name.lower()
+
+    explicit_info = _explicit_main_duplicate_source_info(pdf_path)
+    if explicit_info and explicit_info[0] == primary_pdf:
+        return 1, explicit_info[1], pdf_path.name.lower()
+
+    return 2, 10**9, pdf_path.name.lower()
+
+
+def main_duplicate_group_pdfs(pdf_path: Path) -> list[Path]:
+    explicit_info = _explicit_main_duplicate_source_info(pdf_path)
+    primary_pdf = explicit_info[0] if explicit_info else pdf_path
+
+    group = [primary_pdf]
+    for sibling in _iter_sibling_pdfs(primary_pdf):
+        if sibling == primary_pdf:
+            continue
+        sibling_info = _explicit_main_duplicate_source_info(sibling)
+        if sibling_info and sibling_info[0] == primary_pdf:
+            group.append(sibling)
+
+    group = sorted(
+        {path.resolve(): path for path in group}.values(),
+        key=lambda path: _main_duplicate_sort_key(path, primary_pdf),
+    )
+    if pdf_path not in group:
+        group.append(pdf_path)
+        group = sorted(group, key=lambda path: _main_duplicate_sort_key(path, primary_pdf))
+    return group
+
+
 def supporting_source_info(pdf_path: Path) -> tuple[Path, int] | None:
     explicit_info = _explicit_supporting_source_info(pdf_path)
     if explicit_info:
         return explicit_info
+
+    generic_info = _generic_supporting_source_info(pdf_path)
+    if generic_info:
+        return generic_info
+
+    if not _has_supporting_label(pdf_path.stem):
+        return None
 
     pdf_key = _normalize_pdf_stem_key(pdf_path.stem)
     if not pdf_key:

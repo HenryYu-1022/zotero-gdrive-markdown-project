@@ -1,304 +1,236 @@
 # Paper-agent
 
-中文说明见 [README.zh-CN.markdown](README.zh-CN.markdown)。
+Chinese version: [README.zh-CN.markdown](README.zh-CN.markdown)
 
 ---
 
-## Why This Project Exists
+## Overview
 
-### The Pain Points
+`paper-agent` converts a PDF library into a Markdown library that AI coding agents can search, read, and cross-reference.
 
-If you are a researcher or knowledge worker who uses **Zotero** to manage your literature, you have probably run into these frustrations:
+It is designed for Zotero-centered workflows, but it also works with any plain folder of PDFs.
 
-1. **AI coding agents cannot read your papers.** Tools like [OpenAI Codex](https://openai.com/index/codex/) and [Claude Code](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview) are incredibly powerful at understanding, searching, and synthesizing text — but they operate on *text files*, not PDFs. Your entire Zotero library is locked inside a format that no AI agent can natively ingest.
+The project has two independent inputs:
 
-2. **Zotero is a closed silo for LLM workflows.** Zotero is great for organizing references and reading PDFs, but it does not expose your library as a searchable text corpus. You cannot ask an LLM "find all papers in my library that discuss method X and summarize their approaches" — because the content simply is not available in a form the LLM can consume.
+- The PDF tree on disk, configured by `input_root`
+- The optional Zotero collection hierarchy from `zotero.sqlite`
 
-3. **Manual note-taking does not scale.** You can read papers one by one and write notes, but cross-referencing dozens or hundreds of papers for a literature review, a grant proposal, or a research question requires a level of information integration that is tedious and error-prone when done by hand.
+The physical Markdown output always follows the relative folder structure under `input_root`. Zotero collections are optional metadata and optional extra mirrors; they do not choose the primary physical bundle location.
 
-4. **No bridge between your reference manager and your personal knowledge base.** Even if you maintain a Markdown note library (in Obsidian, Logseq, Notion, or plain files), there is no automatic pipeline to turn your Zotero PDFs into structured Markdown that lives alongside your own notes and can be queried together.
+## What The Project Does
 
-### The Core Idea
+- Converts PDFs to Markdown with [Marker](https://github.com/datalab-to/marker)
+- Writes YAML frontmatter into every generated Markdown file
+- Keeps the physical output tree aligned with the `input_root` tree
+- Places the main paper Markdown and all supporting Markdown files in the same paper folder
+- Renames supporting outputs to `supporting.md`, `supporting_2.md`, `supporting_assets/`, and so on
+- Detects supporting PDFs by filename heuristics such as `_1`, `_2`, `si`, `supporting`, `supplementary information`, and similar labels
+- Detects duplicate main-paper exports such as `Paper.pdf`, `Paper 2.pdf`, `Paper 3.pdf`
+- Deduplicates near-duplicate Markdown outputs for both main papers and supporting files, keeping one canonical bundle per paper
+- Tracks conversion results in `state/manifest.json`
+- Skips unchanged PDFs during normal runs
+- Cleans up Markdown artifacts when source PDFs disappear
+- Retries failed conversions automatically
+- Optionally reads Zotero collections from `zotero.sqlite`, writes `zotero_collections` into frontmatter, and creates extra collection mirrors as `symlink` or `copy`
+- Provides a one-time repair script for normalizing an already-generated Markdown library
 
-**Convert your entire Zotero PDF library into a Markdown corpus, then let AI agents read it.**
+## Output Model
 
-There are two separate data flows — PDF files from disk, and collection hierarchy from Zotero's database:
+For a source tree like:
 
 ```text
- ┌──────────────────┐
- │  zotero.sqlite   │─── collection hierarchy ──┐
- │  (Zotero DB)     │                            │
- └──────────────────┘                            ▼
-                                          ┌─────────────────┐       ┌─────────────────┐
- ┌──────────────────┐   PDF files         │  .md files with │       │  Codex / Claude │
- │  PDF directory   │─────────────────────▶│  YAML front-    │──────▶│  Code search,   │
- │  (from attanger  │     paper-agent     │  matter + text  │       │  summarize,     │
- │   or any source) │   (PDF → Markdown   │  + collection   │       │  integrate      │
- └──────────────────┘    + collection     │  tags & mirrors │       └─────────────────┘
-                          mirroring)      └─────────────────┘               │
-                                                                            ▼
-                                                                    ┌─────────────────┐
-                                                                    │  Sync to your   │
-                                                                    │  personal note  │
-                                                                    │  library        │
-                                                                    └─────────────────┘
+input_root/
+  Topic A/
+    Paper.pdf
+    Paper 3.pdf
+    Paper Supporting Information.pdf
+  Topic B/
+    Another Paper.pdf
 ```
 
-**Key distinction:** `zotero-attanger` exports PDFs to disk but may only store each file in one folder to save space. `paper-agent` reads the **actual Zotero collection hierarchy directly from `zotero.sqlite`**, so even if a paper belongs to 5 collections, it knows — and creates symlink mirrors in the Markdown library for every one of them.
-
-The workflow is:
-
-1. **Sync PDFs via Google Drive** — Use [zotero-attanger](https://github.com/HenryYu-1022/zotero-attanger) to sync your Zotero attachments to Google Drive, making them accessible across multiple devices. `zotero-attanger` moves the PDFs out of Zotero's opaque `storage/` directory into a Google Drive folder, enabling multi-device access. To save space, each PDF is stored in only one folder — that is fine, because `paper-agent` reads the full collection hierarchy directly from `zotero.sqlite`.
-
-2. **Convert & mirror** — Point `paper-agent` at the synced PDF directory **and** at your `zotero.sqlite`. It converts every PDF to Markdown using [Marker](https://github.com/datalab-to/marker), reads the Zotero database to discover all collections each paper belongs to, writes `zotero_collections` tags into YAML frontmatter, and creates **symlink mirrors** so the Markdown library reflects the full Zotero hierarchy.
-
-3. **Query with AI** — Open the resulting Markdown library as a workspace in Codex or Claude Code. Now you can ask questions across your entire library: *"Which papers propose attention-based architectures for time-series forecasting?"*, *"Summarize the experimental setups used in all papers under my `Reinforcement Learning` collection"*, *"Compare the loss functions described in these three papers"*. The AI agent can read, grep, and cross-reference thousands of pages of full-text content in seconds.
-
-4. **Keep in sync** — Run the sync daemon (`sync_zotero_collections.py`) to continuously monitor your Zotero database. When you move papers between collections in Zotero, the Markdown library automatically updates — new symlinks appear, stale ones are removed, and frontmatter tags are refreshed.
-
-5. **Sync to your notes** — Because the output is plain Markdown with structured frontmatter, you can drop the library (or symlink it) into Obsidian, Logseq, or any Markdown-based note system. Your AI-generated insights and your personal annotations live in the same ecosystem.
-
-### Recommended: Using zotero-attanger for Multi-Device PDF Access
-
-[**zotero-attanger**](https://github.com/HenryYu-1022/zotero-attanger) syncs your Zotero attachments to Google Drive so you can access your PDFs from any device. It moves the files out of Zotero's opaque `storage/` directory (where each file lives in a randomly named 8-character folder like `N7SMB24A/`) into a normal, browsable directory on Google Drive.
-
-Because `zotero-attanger` stores each PDF in only one folder to save disk space, a paper that belongs to multiple collections in Zotero will only appear once on disk. **That is completely fine** — `paper-agent` reads the full collection hierarchy directly from `zotero.sqlite` and creates symlink mirrors for every collection.
-
-> **Tip:** If your PDFs are already in a normal folder (local or cloud-synced) and not inside Zotero's `storage/`, you do not need `zotero-attanger` — just point `paper-agent` directly at your PDF root.
-
----
-
-`paper-agent` uses [Marker](https://github.com/datalab-to/marker) to convert a directory tree of PDF papers into a Markdown library. When configured with a Zotero database path, it also reads the collection hierarchy directly from `zotero.sqlite` and creates symlink mirrors so the Markdown library matches your full Zotero organization.
-
-## What It Does
-
-- Converts PDFs to Markdown with Marker
-- Watches an input folder and processes new or changed PDFs
-- Keeps output organized with the same relative folder structure as the input tree
-- Detects supporting PDFs like `Paper_1.pdf` and merges them into the main paper bundle
-- Tracks conversion state in a manifest to skip unchanged files
-- Cleans up Markdown artifacts when the source PDF is deleted
-- Writes YAML frontmatter into generated Markdown files
-- Supports both manual runs and background watcher startup on Windows and macOS
-
-## Input Model
-
-`paper-agent` does not care where the PDFs come from. `input_root` can be:
-
-- A normal local folder
-- A cloud sync folder such as Google Drive, iCloud Drive, Dropbox, or OneDrive
-- A collection-based export directory produced by tools like `zotero-attanger`
-
-The only requirement is that all PDFs you want to process live under one root directory.
-
-## Directory Model
-
-You configure two roots:
-
-- `input_root`: where the PDFs live
-- `output_root`: where Markdown, logs, manifest, and temporary Marker output are written
-
-Keep them separate. Do not point `output_root` inside `input_root`.
-
-## Prerequisites
-
-> **⚠️ Hardware requirement:** Marker uses deep learning models to convert PDFs. You need a machine with at least **8 GB RAM**. A dedicated **GPU is strongly recommended** — NVIDIA GPU with CUDA (Windows/Linux), or Apple Silicon with MPS (Mac). Without a GPU, conversion will be very slow (minutes per PDF instead of seconds). A CPU-only machine *can* work, but only for small libraries.
-
-Here is what you need to install, step by step:
-
-### 1. Install Python
-
-You need Python 3.10 or newer. If you are not sure whether you have it, open a terminal and run:
-
-```bash
-python3 --version
-```
-
-If the version is below 3.10, or the command is not found, download Python from [python.org](https://www.python.org/downloads/).
-
-### 2. Install PyTorch
-
-PyTorch is the deep learning framework that Marker runs on. Go to [pytorch.org](https://pytorch.org/get-started/locally/) and follow the instructions for your platform:
-
-- **Mac (Apple Silicon):** PyTorch works out of the box with MPS acceleration
-- **Windows/Linux with NVIDIA GPU:** Select the CUDA version that matches your driver
-- **No GPU:** Select CPU — it will work, just much slower
-
-### 3. Install Marker
-
-```bash
-pip install marker-pdf
-# or, for extra document format support:
-pip install marker-pdf[full]
-```
-
-### 4. Install project dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 5. Download Marker models (first time only)
-
-The first time you run Marker, it downloads the required AI models (~1–2 GB). Run this once to cache them:
-
-```bash
-marker_single /path/to/any-test.pdf --output_dir /tmp/test_out --force_ocr
-```
-
-You can delete the test output afterward. The models are cached and will not need to be downloaded again.
-
-## Quick Start
-
-### 1. Create Config
-
-macOS / Linux:
-
-```bash
-cp paper_to_markdown/settings.example.json paper_to_markdown/settings.json
-```
-
-Windows PowerShell:
-
-```powershell
-Copy-Item paper_to_markdown\settings.example.json paper_to_markdown\settings.json
-```
-
-Example:
-
-```jsonc
-{
-  "_comment_01": "macOS only needs python_path; pythonw_path is only used on Windows.",
-  "input_root": "/Users/yourname/Documents/paper-library/input",
-  "output_root": "/Users/yourname/Documents/paper-library/output",
-  "python_path": "/opt/homebrew/bin/python3",
-  "pythonw_path": "",
-  "model_cache_dir": "/Users/yourname/.cache/marker/datalab_model_cache",
-  "marker_cli": "/absolute/path/to/marker_single",
-  "hf_home": "/Users/yourname/.cache/huggingface",
-  "torch_device": "mps"
-}
-```
-
-Notes:
-
-- `marker_cli` can be an absolute path or just `marker_single`
-- `python_path` should be absolute, especially for background startup
-- macOS LaunchAgent reads `python_path` and does not read `pythonw_path`
-- `pythonw_path` is only for Windows background scheduled tasks; on macOS you can leave it empty or omit it
-- `torch_device` is usually `cuda` on NVIDIA Windows/Linux, `mps` on Apple Silicon, and `cpu` when no accelerator is available
-- Save `paper_to_markdown/settings.json` as UTF-8. This is especially important if your paths contain non-ASCII characters such as Chinese.
-
-### 2. Run a Batch Conversion
-
-```bash
-cd paper_to_markdown
-python3 run_once.py
-```
-
-### 3. Start the Watcher
-
-```bash
-cd paper_to_markdown
-python3 watch_folder_resilient.py
-```
-
-## Which File Should I Start?
-
-If you only remember one section in this README, use this map:
-
-| Goal | Start this file | Run from | Long-running? | What actually stays alive |
-|-----|-----|-----|-----|-----|
-| Convert the current library once | `paper_to_markdown/run_once.py` | `paper_to_markdown/` | No | Nothing; it exits when the batch finishes |
-| Continuously watch `input_root` for new PDFs | `paper_to_markdown/watch_folder_resilient.py` | `paper_to_markdown/` | Yes | `watch_folder_resilient.py` itself |
-| Continuously sync Zotero collection mirrors | `paper_to_markdown/sync_zotero_collections.py` | `paper_to_markdown/` | Optional yes | `sync_zotero_collections.py` itself |
-| Auto-start the watcher at login on macOS | `watch_autostart.sh` | repo root | No | `autostart/paper_agent_watch_supervisor.sh` + `watch_folder_resilient.py` |
-| Auto-start the watcher at login on Windows | `watch_autostart.ps1` | repo root | No | `autostart/paper_agent_watch_supervisor.ps1` + `watch_folder_resilient.py` |
-
-Practical summary:
-
-- `run_once.py` is the main manual entrypoint.
-- `watch_folder_resilient.py` is the main always-on watcher.
-- `watch_autostart.sh` and `watch_autostart.ps1` are the recommended one-command entrypoints for login auto-start management.
-- `autostart/install_or_update_launch_agent.sh`, `autostart/remove_launch_agent.sh`, `autostart/install_or_update_watch_task.ps1`, and `autostart/remove_watch_task.ps1` are the underlying installer/remover scripts.
-- `autostart/paper_agent_watch_supervisor.sh` and `autostart/paper_agent_watch_supervisor.ps1` are the background supervisors that keep the watcher alive after OS login.
-- `sync_zotero_collections.py` is a separate daemon. The current auto-start installers do not install it for you.
-
-## Local Folder Workflow
-
-If your PDFs are already stored locally, for example:
+the normalized Markdown layout is:
 
 ```text
-/Users/you/Documents/PapersByTopic/
-  AI/
-    Paper1.pdf
-    Paper1_1.pdf
-  Chemistry/
-    Paper2.pdf
+output_root/
+  markdown/
+    Topic A/
+      Paper/
+        Paper.md
+        supporting.md
+        supporting_assets/
+    Topic B/
+      Another Paper/
+        Another Paper.md
+  marker_raw/
+  state/
+    manifest.json
+    collection_state.json
+  logs/
+    app.log
+    failed_pdfs.txt
 ```
 
-set:
+Important behavior:
 
-- `input_root=/Users/you/Documents/PapersByTopic`
-- `output_root=/Users/you/Documents/paper-agent-output`
+- `Paper 3.pdf` does not need its own Markdown folder if its converted Markdown is effectively the same as `Paper.pdf`
+- `Paper Supporting Information.pdf` is stored inside `Topic A/Paper/`, not in a separate sibling bundle
+- The paper bundle is the unit of organization: one paper, one folder
 
-Then run:
+If Zotero collection mirroring is enabled, extra collection paths may also appear under `output_root/markdown/` as mirrors of the same canonical paper bundle:
+
+- `symlink` mode saves space
+- `copy` mode creates normal copied directories
+
+## Start Here
+
+| Goal | File to start | Run from | Long-running? |
+|-----|-----|-----|-----|
+| Convert the whole library once | `paper_to_markdown/run_once.py` | `paper_to_markdown/` | No |
+| Watch for new or changed PDFs | `paper_to_markdown/watch_folder_resilient.py` | `paper_to_markdown/` | Yes |
+| Sync Zotero collections into frontmatter and mirror folders | `paper_to_markdown/sync_zotero_collections.py` | `paper_to_markdown/` | Optional |
+| Repair an existing Markdown library in place | `normalize_existing_markdown_library.py` | repo root | No |
+| Backfill missing supporting Markdown files | `backfill_supporting.py` | repo root | No |
+| Monitor batch progress and ETA | `monitor_conversion_progress.py` | repo root | No |
+
+## Python File Guide
+
+### Root-Level Python Files
+
+| File | Role | Typical use |
+|-----|-----|-----|
+| `normalize_existing_markdown_library.py` | One-time migration tool for an already-generated Markdown library. Moves old standalone supporting bundles into the main paper folder, merges duplicate main bundles, deduplicates supporting Markdown, and refreshes manifest entries. | Run once after upgrading the pipeline logic, or when you want to normalize an old library without reconverting PDFs. |
+| `backfill_supporting.py` | Scans the PDF library for supporting PDFs whose normalized `supporting*.md` output is missing, then optionally reconverts only those PDFs. | Repair incomplete supporting bundles. |
+| `monitor_conversion_progress.py` | Reads `logs/app.log` and `state/manifest.json` to show batch progress, current PDF, historical average conversion time, and ETA. | Watch long conversions without opening log files manually. |
+
+### `paper_to_markdown/` Python Files
+
+| File | Role | Typical use |
+|-----|-----|-----|
+| `paper_to_markdown/__init__.py` | Marks `paper_to_markdown` as a Python package. | Imported implicitly; no direct action. |
+| `paper_to_markdown/common.py` | Shared utilities for config loading, path resolution, frontmatter helpers, supporting/main duplicate filename grouping, bundle naming, and common filesystem helpers. | Internal module imported by the runnable scripts. |
+| `paper_to_markdown/pipeline.py` | Core conversion engine. Runs Marker, writes Markdown bundles, applies supporting placement rules, deduplicates near-duplicate Markdown, updates the manifest, manages cleanup, and exposes the main conversion functions. | Internal engine used by `run_once.py`, the watcher, and repair tools. |
+| `paper_to_markdown/run_once.py` | Main manual CLI entrypoint. Supports full-library conversion, single-PDF conversion, forced reconvert, and orphan cleanup. | Use this for normal batch runs. |
+| `paper_to_markdown/watch_folder_resilient.py` | Filesystem watcher for `input_root`. Debounces events, waits for file stability, converts new/changed PDFs, and removes artifacts for deleted PDFs. | Use this for always-on background processing. |
+| `paper_to_markdown/sync_zotero_collections.py` | Syncs Zotero collection assignments into Markdown frontmatter and collection mirror folders using the manifest as the source of converted files. | Run once or as a daemon when collection assignments change in Zotero. |
+| `paper_to_markdown/zotero_collections.py` | Read-only Zotero SQLite adapter. Resolves collection paths and maps PDF filenames to collection lists. | Internal module used by the pipeline and collection sync script. |
+
+## Non-Python Startup Helpers
+
+These are not Python files, but they are part of the runtime workflow:
+
+| File | Role |
+|-----|-----|
+| `watch_autostart.sh` | macOS entrypoint for install/status/remove of the watcher LaunchAgent |
+| `watch_autostart.ps1` | Windows entrypoint for install/status/remove of the watcher Scheduled Task |
+| `autostart/paper_agent_watch_supervisor.sh` | macOS supervisor that keeps the watcher alive |
+| `autostart/paper_agent_watch_supervisor.ps1` | Windows supervisor that keeps the watcher alive |
+| `autostart/install_or_update_launch_agent.sh` | Installs or updates the macOS LaunchAgent |
+| `autostart/remove_launch_agent.sh` | Removes the macOS LaunchAgent |
+| `autostart/install_or_update_watch_task.ps1` | Installs or updates the Windows Scheduled Task |
+| `autostart/remove_watch_task.ps1` | Removes the Windows Scheduled Task |
+
+## Main Rules The Pipeline Follows
+
+### 1. Physical Folder Rule
+
+The real bundle location is derived from the PDF path under `input_root`.
+
+If a PDF lives at:
+
+```text
+input_root/My Library/Thesis/Paper.pdf
+```
+
+its canonical Markdown bundle lives at:
+
+```text
+output_root/markdown/My Library/Thesis/Paper/
+```
+
+### 2. Supporting Placement Rule
+
+Supporting PDFs are not stored in separate paper folders anymore.
+
+If the pipeline identifies a PDF as supporting material, it writes it into the main paper bundle as:
+
+- `supporting.md`
+- `supporting_2.md`
+- `supporting_assets/`
+- `supporting_2_assets/`
+
+### 3. Duplicate Main-Paper Rule
+
+If a directory contains files like:
+
+- `Paper.pdf`
+- `Paper 2.pdf`
+- `Paper 3.pdf`
+
+the pipeline groups them as candidate duplicates. If the converted Markdown bodies are near-duplicates, it keeps one canonical main bundle and repoints the others to the same canonical Markdown in the manifest.
+
+### 4. Existing-Library Repair Rule
+
+`normalize_existing_markdown_library.py` uses the same supporting and duplicate heuristics to repair an already-generated Markdown library in place. It is for old output libraries produced before the newer normalization logic existed.
+
+## Quick Commands
+
+### Convert Once
 
 ```bash
 cd paper_to_markdown
-python3 run_once.py
-```
 
-This works the same way for any exporter that has already arranged PDFs into folders, including `zotero-attanger`.
-
-## Usage
-
-Scripts inside `paper_to_markdown/` should be run from that directory. Root-level utilities such as `backfill_supporting.py`, `monitor_conversion_progress.py`, `watch_autostart.ps1`, and `watch_autostart.sh` should be run from the repository root. The lower-level auto-start helpers now live under `autostart/`.
-
-### Manual Conversion
-
-```bash
-cd paper_to_markdown
-
-# convert all PDFs under input_root
+# Convert all PDFs under input_root
 python3 run_once.py
 
-# convert one PDF
+# Convert one PDF
 python3 run_once.py --path "/path/to/input_root/subdir/Paper.pdf"
 
-# reconvert everything
+# Force reconvert
 python3 run_once.py --force
 
-# test with a small batch
+# Test on a small batch
 python3 run_once.py --limit 5
 
-# clean artifacts whose source PDFs no longer exist
+# Delete artifacts for source PDFs that no longer exist
 python3 run_once.py --cleanup
-
-# use a custom config file
-python3 run_once.py --config /path/to/settings.json
 ```
 
-### Watch Mode
+### Watch For Changes
 
 ```bash
 cd paper_to_markdown
 python3 watch_folder_resilient.py
 ```
 
-The watcher recursively monitors `input_root` and handles:
+### Sync Zotero Collections
 
-- PDF created: queue for conversion after debounce and stability checks
-- PDF modified: queue again
-- PDF moved or renamed: queue the new path
-- PDF deleted: remove Markdown bundle, raw output, and manifest entry
+```bash
+cd paper_to_markdown
 
-### Backfill Supporting PDFs
+# One-shot sync
+python3 sync_zotero_collections.py --once
+
+# Daemon mode
+python3 sync_zotero_collections.py
+
+# Custom interval
+python3 sync_zotero_collections.py --interval 30
+```
+
+### Repair Missing Supporting Files
 
 ```bash
 python3 backfill_supporting.py
 python3 backfill_supporting.py --apply
 python3 backfill_supporting.py --limit 10
+```
+
+### Normalize An Existing Markdown Library
+
+```bash
+python3 normalize_existing_markdown_library.py
+python3 normalize_existing_markdown_library.py --config paper_to_markdown/settings.json
+python3 normalize_existing_markdown_library.py --limit 20
 ```
 
 ### Monitor Progress
@@ -308,278 +240,57 @@ python3 monitor_conversion_progress.py
 python3 monitor_conversion_progress.py --watch --interval 30
 ```
 
-## Background Startup
-
-### macOS LaunchAgent
-
-```bash
-zsh ./watch_autostart.sh install
-zsh ./watch_autostart.sh status
-zsh ./watch_autostart.sh remove
-```
-
-macOS uses a per-user LaunchAgent here, so normally you should run it without `sudo`:
-
-```bash
-zsh ./watch_autostart.sh install
-```
-
-- `watch_autostart.sh`: unified install/remove/status entrypoint
-- Under the hood it calls `autostart/install_or_update_launch_agent.sh` and `autostart/remove_launch_agent.sh`
-- Supervisor: `autostart/paper_agent_watch_supervisor.sh`
-- Long-running background processes after install: `autostart/paper_agent_watch_supervisor.sh` and its child `paper_to_markdown/watch_folder_resilient.py`
-- Default label: `com.paper.agent.watch`
-- Installed plist: `~/Library/LaunchAgents/com.paper.agent.watch.plist`
-
-### Windows Scheduled Task
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "E:\YHY\Paper-agent\watch_autostart.ps1" # replace with your own local file path if different
-powershell -NoProfile -ExecutionPolicy Bypass -File "E:\YHY\Paper-agent\watch_autostart.ps1" -Action status # replace with your own local file path if different
-powershell -NoProfile -ExecutionPolicy Bypass -File "E:\YHY\Paper-agent\watch_autostart.ps1" -Action remove # replace with your own local file path if different
-```
-
-Run the install command as Administrator from a normal PowerShell session:
-
-```powershell
-Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File "E:\YHY\Paper-agent\watch_autostart.ps1"' # replace with your own local file path if different
-```
-
-- `watch_autostart.ps1`: unified install/remove/status entrypoint
-- Under the hood it calls `autostart/install_or_update_watch_task.ps1` and `autostart/remove_watch_task.ps1`
-- Supervisor: `autostart/paper_agent_watch_supervisor.ps1`
-- Long-running background processes after install: `autostart/paper_agent_watch_supervisor.ps1` and its child `paper_to_markdown/watch_folder_resilient.py`
-- Default task name: `PaperAgentWatch`
-
-Important: this background startup setup only covers the PDF watcher. If you also want continuous Zotero collection syncing, you still need to run `paper_to_markdown/sync_zotero_collections.py` separately.
-
-## Output Structure
-
-For an input tree like:
-
-```text
-input_root/
-  AI/
-    Paper1.pdf
-    Paper1_1.pdf
-  Chemistry/
-    Paper2.pdf
-```
-
-the output is:
-
-```text
-output_root/
-  markdown/
-    AI/
-      Paper1/
-        Paper1.md
-        supporting.md
-        supporting_assets/
-    Chemistry/
-      Paper2/
-        Paper2.md
-  state/
-    manifest.json
-  marker_raw/
-  logs/
-    app.log
-    failed_pdfs.txt
-```
-
-## Frontmatter
-
-Each Markdown file gets YAML frontmatter similar to:
-
-```yaml
----
-source_pdf: /path/to/input_root/AI/Paper1.pdf
-source_relpath: AI/Paper1.pdf
-source_filename: Paper1.pdf
-converter: marker_single
-converted_at: '2026-04-09T10:30:45.123456+00:00'
-torch_device: mps
-force_ocr: true
-document_role: main
----
-```
-
-Supporting PDFs also include `supporting_index` and primary-paper metadata.
-
-## Zotero Collection Mirroring
-
-If you configure `zotero_db_path` in `settings.json`, `paper-agent` reads your Zotero database (read-only) to discover which collections each paper belongs to. It then:
-
-1. **Tags each Markdown file** with a `zotero_collections` list in the YAML frontmatter
-2. **Creates symlink mirrors** so the paper appears in every collection folder, even if the PDF only exists in one physical location
-
-For example, if a paper belongs to both `Research/NLP` and `Coursework/CS229` in Zotero but only exists in `Research/NLP/` on disk:
-
-```text
-output_root/
-  markdown/
-    Research/NLP/Paper/          ← real directory
-      Paper.md
-    Coursework/CS229/Paper/      ← symlink → Research/NLP/Paper/
-```
-
-The YAML frontmatter will include:
-
-```yaml
-zotero_collections:
-  - Coursework/CS229
-  - Research/NLP
-```
-
-### Sync Daemon
-
-When you move papers between collections in Zotero, run the sync daemon to update the Markdown library:
-
-```bash
-# One-shot sync
-cd paper_to_markdown
-python3 sync_zotero_collections.py --once
-
-# Continuous daemon (polls every 60 seconds by default)
-python3 sync_zotero_collections.py
-
-# Custom interval
-python3 sync_zotero_collections.py --interval 30
-```
-
-The daemon detects changes in collection assignments and:
-- Adds new symlink mirrors when a paper is added to a collection
-- Removes symlink mirrors when a paper is removed from a collection
-- Updates the `zotero_collections` field in the YAML frontmatter
-
-Zotero can remain running while the sync daemon operates. The database is opened in immutable read-only mode.
-
-## Supporting PDF Rules
-
-A PDF is treated as supporting material when all of these are true:
-
-1. The converted markdown contains `supportinginformation` near the start after whitespace and punctuation are normalized
-2. A main PDF with a matching name can be found in the same directory
-
-Numeric suffixes such as `_1` and `_2` are still supported for indexing, but they are no longer required for supporting detection.
-
-Otherwise it is treated as a standalone paper.
-
-## Automatic Retry on Failure
-
-Marker occasionally crashes or fails due to transient issues such as GPU memory pressure or corrupted intermediate state. To handle this, `paper-agent` automatically retries failed conversions up to 3 times:
-
-- **Batch mode (`run_once.py`)**: After the first pass, any PDFs that failed are retried up to 3 additional times. The final `failed_pdfs.txt` report only lists PDFs that still fail after all retries.
-- **Single-file mode (`run_once.py --path`)**: The same 3-retry logic applies.
-- **Watch mode (`watch_folder_resilient.py`)**: Each PDF that triggers a filesystem event is converted with up to 3 retry attempts before being marked as failed.
-
-The retry count is controlled by `MAX_CONVERSION_RETRIES` in `pipeline.py` (default: 3).
-
 ## Configuration Reference
 
-Config file: `paper_to_markdown/settings.json`
+Runtime config file: `paper_to_markdown/settings.json`
 
-| Key | Required | Default | Description |
-|-----|----------|---------|-------------|
-| `input_root` | Yes | -- | Root directory containing the source PDFs |
-| `output_root` | Yes | -- | Root directory for markdown, state, logs, and raw output |
-| `marker_cli` | Yes | -- | Marker command or absolute path, such as `marker_single` or `.venv/bin/marker_single` |
-| `hf_home` | Yes | -- | Hugging Face cache directory |
-| `python_path` | No | -- | Absolute Python path actually used by macOS LaunchAgent, and also available as a Windows fallback |
-| `pythonw_path` | No | -- | Preferred hidden-background `pythonw.exe` path for Windows scheduled tasks only; macOS does not need or read this field |
-| `marker_repo_root` | No | -- | Optional Marker working directory, only needed for special local setups |
-| `model_cache_dir` | No | -- | Exported as `MODEL_CACHE_DIR` by the supervisor scripts |
-| `torch_device` | No | `cuda` | `cuda`, `mps`, or `cpu` |
-| `output_format` | No | `markdown` | Marker output format |
-| `force_ocr` | No | `false` | Force OCR even for machine-readable PDFs |
-| `disable_image_extraction` | No | `false` | Disable image extraction |
-| `disable_multiprocessing` | No | `false` | Disable Marker multiprocessing |
-| `paginate_output` | No | `false` | Add page markers to Markdown |
-| `compute_sha256` | No | `false` | Add SHA256 to change detection |
-| `log_level` | No | `INFO` | Logging level |
-| `watch_debounce_seconds` | No | `8` | Delay before processing a changed file |
-| `watch_stable_checks` | No | `3` | Number of stability checks before conversion |
-| `watch_stable_interval_seconds` | No | `2` | Seconds between stability checks |
-| `watch_rescan_interval_seconds` | No | `60` | Periodic full rescan interval; `0` disables it |
-| `watch_initial_scan` | No | `true` | Queue existing unprocessed PDFs when watcher starts |
-| `zotero_db_path` | No | -- | Path to `zotero.sqlite`; enables collection hierarchy mirroring when set |
-| `collection_mirror_mode` | No | `symlink` | `symlink` (saves space) or `copy` (for Windows without admin) |
-| `zotero_sync_interval_seconds` | No | `60` | Polling interval for the collection sync daemon |
+| Key | Meaning |
+|-----|-----|
+| `input_root` | Root of the PDF tree |
+| `output_root` | Root of generated Markdown, state, logs, and Marker raw output |
+| `marker_cli` | Marker executable, usually `marker_single` or an absolute path |
+| `hf_home` | Hugging Face cache directory |
+| `python_path` | Python path used by macOS LaunchAgent and as a general explicit interpreter path |
+| `pythonw_path` | Windows-only preferred background interpreter |
+| `marker_repo_root` | Optional working directory for Marker |
+| `model_cache_dir` | Optional model cache environment variable for the supervisors |
+| `torch_device` | Usually `cuda`, `mps`, or `cpu` |
+| `force_ocr` | Whether Marker should force OCR |
+| `disable_image_extraction` | Disable image extraction if needed |
+| `disable_multiprocessing` | Disable Marker multiprocessing if needed |
+| `paginate_output` | Add page markers in Markdown |
+| `compute_sha256` | Include SHA256 in change detection |
+| `log_level` | Logging level |
+| `watch_debounce_seconds` | Debounce delay before the watcher processes a changed file |
+| `watch_stable_checks` | Number of file-stability checks before conversion |
+| `watch_stable_interval_seconds` | Delay between stability checks |
+| `watch_rescan_interval_seconds` | Periodic full rescan interval; `0` disables it |
+| `watch_initial_scan` | Whether the watcher queues existing PDFs on startup |
+| `zotero_db_path` | Path to `zotero.sqlite` |
+| `collection_mirror_mode` | `symlink` or `copy` for extra Zotero collection mirrors |
+| `zotero_sync_interval_seconds` | Polling interval used by the collection sync daemon |
 
-## File-by-File Guide
+## Zotero Collection Behavior
 
-### Runtime files
+If `zotero_db_path` is configured:
 
-| File | Purpose | How to use it | Background resident? |
-|-----|-----|-----|-----|
-| `paper_to_markdown/run_once.py` | Main manual CLI for batch conversion, single-file conversion, forced reconvert, and cleanup | `cd paper_to_markdown && python3 run_once.py` | No |
-| `paper_to_markdown/watch_folder_resilient.py` | Main watcher daemon for `input_root`; converts PDFs when files are created, changed, moved, or deleted | `cd paper_to_markdown && python3 watch_folder_resilient.py` | Yes, if you leave it running |
-| `paper_to_markdown/sync_zotero_collections.py` | Syncs Zotero collection assignments into frontmatter and mirror folders | `cd paper_to_markdown && python3 sync_zotero_collections.py --once` or run without `--once` for daemon mode | Optional; yes in daemon mode |
-| `paper_to_markdown/pipeline.py` | Core conversion engine: runs Marker, writes Markdown/frontmatter, manages manifest, retries, and cleanup | Imported by other scripts; do not start directly | No |
-| `paper_to_markdown/common.py` | Shared helpers for config loading, paths, logging, manifest/state locations, and frontmatter utilities | Imported by other scripts; do not start directly | No |
-| `paper_to_markdown/zotero_collections.py` | Read-only Zotero SQLite reader used to resolve collection hierarchy | Imported by other scripts; do not start directly | No |
-| `paper_to_markdown/__init__.py` | Marks `paper_to_markdown` as a Python package | No direct action | No |
-| `paper_to_markdown/settings.example.json` | Config template you copy before first run | Copy to `paper_to_markdown/settings.json` and edit paths | No |
-| `paper_to_markdown/settings.json` | Your machine-local runtime config file | Created by you; every runnable script reads it | No |
+- The pipeline writes `zotero_collections` into frontmatter
+- The physical output tree still follows `input_root`
+- Extra Zotero collection locations are created as mirrors of the canonical bundle
+- Those mirrors can be `symlink` or `copy`, depending on `collection_mirror_mode`
 
-### Utility and repair files
+This distinction matters:
 
-| File | Purpose | How to use it | Background resident? |
-|-----|-----|-----|-----|
-| `backfill_supporting.py` | Finds supporting PDFs whose Markdown companion is missing and optionally backfills them | `python3 backfill_supporting.py` or `python3 backfill_supporting.py --apply` from repo root | No |
-| `monitor_conversion_progress.py` | Read-only status viewer for manifest/log progress and ETA | `python3 monitor_conversion_progress.py` or `python3 monitor_conversion_progress.py --watch --interval 30` from repo root | No; `--watch` just keeps the terminal open |
+- `input_root` decides where the real bundle lives
+- Zotero collections only add metadata and optional extra mirrors
 
-### Background automation files
+## Notes And Caveats
 
-| File | Purpose | How to use it | Background resident? |
-|-----|-----|-----|-----|
-| `watch_autostart.sh` | Unified macOS entrypoint to install, remove, or inspect the LaunchAgent | `zsh ./watch_autostart.sh install`, `status`, or `remove` from repo root | No |
-| `autostart/install_or_update_launch_agent.sh` | Installs or refreshes the macOS LaunchAgent that auto-starts the watcher on login | Usually called via `zsh ./watch_autostart.sh install` | No; installer only |
-| `autostart/remove_launch_agent.sh` | Removes the macOS LaunchAgent and stops related watcher processes | Usually called via `zsh ./watch_autostart.sh remove` | No |
-| `autostart/paper_agent_watch_supervisor.sh` | macOS supervisor loop that restarts `watch_folder_resilient.py` if it exits | Started by LaunchAgent; not usually run by hand | Yes, after install |
-| `watch_autostart.ps1` | Unified Windows entrypoint to install, remove, or inspect the Scheduled Task | `powershell -NoProfile -ExecutionPolicy Bypass -File .\watch_autostart.ps1`, optionally with `-Action status` or `-Action remove`, from repo root | No |
-| `autostart/install_or_update_watch_task.ps1` | Installs or refreshes the Windows Scheduled Task that auto-starts the watcher on login | Usually called via `watch_autostart.ps1` | No; installer only |
-| `autostart/remove_watch_task.ps1` | Removes the Windows Scheduled Task | Usually called via `watch_autostart.ps1 -Action remove` | No |
-| `autostart/paper_agent_watch_supervisor.ps1` | Windows supervisor loop that restarts `watch_folder_resilient.py` if it exits | Started by Scheduled Task; not usually run by hand | Yes, after install |
-
-### Documentation and metadata files
-
-| File | Purpose | How to use it | Background resident? |
-|-----|-----|-----|-----|
-| `README.markdown` | English documentation | Read it | No |
-| `README.zh-CN.markdown` | Chinese documentation | Read it | No |
-| `requirements.txt` | Python dependency list for this project | `pip install -r requirements.txt` | No |
-| `docs/superpowers/specs/2026-04-09-mac-launchagent-design.md` | Design note for the macOS LaunchAgent workflow | Reference only | No |
-| `docs/superpowers/plans/2026-04-09-mac-launchagent.md` | Implementation planning note for macOS background startup | Reference only | No |
-| `LICENSE` | License text | Reference only | No |
-
-## Notes
-
-- `settings.json` is machine-specific and gitignored
-- The `_comment_*` fields at the top of `settings.example.json` are human-readable notes and do not affect runtime behavior
-- `paper-agent` works with local folders and does not require Google Drive
-- If you use `zotero-attanger`, point `input_root` at its exported PDF tree
-- macOS LaunchAgents do not inherit your interactive shell PATH, and the scripts only read `python_path`, so that field should be absolute
-- Windows background tasks prefer `pythonw_path`; if it is missing, they fall back to `python_path`
-- Save `paper_to_markdown/settings.json` as UTF-8 if any path contains non-ASCII characters such as Chinese
-- macOS reads `settings.json` through `plutil`, so the Windows PowerShell Unicode-path decoding issue should not occur there
-
-## Acknowledgments
-
-This project was built with significant assistance from AI coding agents — part of the very workflow it enables:
-
-<table>
-  <tr>
-    <td align="center"><a href="https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview"><img src="https://img.shields.io/badge/Claude_Code-Anthropic-CC785C?style=for-the-badge&logo=anthropic&logoColor=white" alt="Claude Code"></a></td>
-    <td>Architecture design, code implementation, documentation, and iterative debugging were pair-programmed with <strong>Claude Code</strong>.</td>
-  </tr>
-  <tr>
-    <td align="center"><a href="https://openai.com/index/codex/"><img src="https://img.shields.io/badge/Codex-OpenAI-412991?style=for-the-badge&logo=openai&logoColor=white" alt="OpenAI Codex"></a></td>
-    <td><strong>OpenAI Codex</strong> was used for code review, refactoring suggestions, and cross-referencing implementation patterns.</td>
-  </tr>
-</table>
-
-> *"We built a tool to let AI agents read research papers — and used AI agents to build it."*
+- Keep `output_root` outside `input_root`
+- A GPU is strongly recommended for Marker
+- If you use collection syncing, PDF-to-collection mapping is filename-based; unique PDF filenames are safest
+- `copy` mirror mode is simpler on Windows but duplicates storage
+- `symlink` mirror mode saves space but may need elevated privileges depending on your platform and settings
 
 ## License
 

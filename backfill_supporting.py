@@ -8,11 +8,13 @@ from paper_to_markdown.common import (
     cleanup_marker_raw_root,
     find_all_pdfs,
     load_config,
+    manifest_path,
+    relative_pdf_path,
     setup_logger,
     supporting_markdown_name,
     supporting_source_info,
 )
-from paper_to_markdown.pipeline import convert_one_pdf
+from paper_to_markdown.pipeline import ManifestStore, convert_one_pdf, output_markdown_matches_current_layout
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,12 +45,18 @@ def main() -> None:
     config = load_config(args.config)
     logger = setup_logger(config, logger_name="paper_to_markdown.backfill")
     input_root = Path(config["input_root"])
+    manifest = ManifestStore(manifest_path(config))
 
     try:
         missing: list[tuple[Path, Path]] = []
         for pdf_path in find_all_pdfs(input_root):
             supporting_info = supporting_source_info(pdf_path)
             if not supporting_info:
+                continue
+
+            rel_key = str(relative_pdf_path(pdf_path, input_root)).replace("\\", "/")
+            entry = manifest.get(rel_key)
+            if output_markdown_matches_current_layout(pdf_path, input_root, config, entry):
                 continue
 
             primary_pdf, supporting_index = supporting_info

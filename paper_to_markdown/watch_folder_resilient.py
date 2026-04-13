@@ -24,7 +24,13 @@ try:
         supporting_markdown_name,
         supporting_source_info,
     )
-    from .pipeline import ManifestStore, convert_one_pdf_with_retries, delete_pdf_artifacts
+    from .pipeline import (
+        ManifestStore,
+        cleanup_standalone_supporting_bundle,
+        convert_one_pdf_with_retries,
+        delete_pdf_artifacts,
+        output_markdown_matches_current_layout,
+    )
 except ImportError:
     from common import (
         bundle_dir_for_pdf,
@@ -41,7 +47,13 @@ except ImportError:
         supporting_markdown_name,
         supporting_source_info,
     )
-    from pipeline import ManifestStore, convert_one_pdf_with_retries, delete_pdf_artifacts
+    from pipeline import (
+        ManifestStore,
+        cleanup_standalone_supporting_bundle,
+        convert_one_pdf_with_retries,
+        delete_pdf_artifacts,
+        output_markdown_matches_current_layout,
+    )
 
 
 def is_pdf_path(path: str) -> bool:
@@ -131,6 +143,19 @@ class PdfEventHandler(FileSystemEventHandler):
         return True
 
     def _needs_processing(self, pdf_path: Path, manifest: ManifestStore) -> bool:
+        rel_key = str(relative_pdf_path(pdf_path, self.input_root)).replace("\\", "/")
+        entry = manifest.get(rel_key)
+        if output_markdown_matches_current_layout(
+            pdf_path, self.input_root, self.config, entry,
+        ):
+            supporting_info = supporting_source_info(pdf_path)
+            if supporting_info:
+                primary_pdf, _supporting_index = supporting_info
+                cleanup_standalone_supporting_bundle(
+                    pdf_path, primary_pdf, self.input_root, self.config, logger=self.logger,
+                )
+            return False
+
         bundle_dir = bundle_dir_for_pdf(pdf_path, self.input_root, self.config)
         supporting_info = supporting_source_info(pdf_path)
         if supporting_info:
@@ -143,8 +168,6 @@ class PdfEventHandler(FileSystemEventHandler):
         if target_md.exists():
             return False
 
-        rel_key = str(relative_pdf_path(pdf_path, self.input_root)).replace("\\", "/")
-        entry = manifest.get(rel_key)
         fingerprint = pdf_fingerprint(
             pdf_path,
             use_sha256=self.config.get("compute_sha256", False),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from difflib import SequenceMatcher
 import json
 import os
 import re
@@ -19,8 +20,10 @@ try:
         is_relative_to,
         is_supporting_artifact_name,
         load_config,
+        main_duplicate_group_pdfs,
         manifest_path,
         markdown_root,
+        parse_frontmatter,
         pdf_bundle_relpath,
         pdf_fingerprint,
         raw_dir_for_pdf,
@@ -48,8 +51,10 @@ except ImportError:
         is_relative_to,
         is_supporting_artifact_name,
         load_config,
+        main_duplicate_group_pdfs,
         manifest_path,
         markdown_root,
+        parse_frontmatter,
         pdf_bundle_relpath,
         pdf_fingerprint,
         raw_dir_for_pdf,
@@ -69,6 +74,22 @@ except ImportError:
 
 SUPPORTING_CONTENT_MARKER = "supportinginformation"
 MAX_CONVERSION_RETRIES = 3
+DUPLICATE_MARKDOWN_MIN_NORMALIZED_LEN = 4000
+DUPLICATE_MARKDOWN_MIN_LENGTH_RATIO = 0.97
+DUPLICATE_MARKDOWN_MAX_CHAR_DELTA = 1200
+DUPLICATE_MARKDOWN_SIMILARITY_THRESHOLD = 0.985
+SUPPORTING_MARKDOWN_FILE_RE = re.compile(r"^supporting(?:_(?P<index>\d+))?\.md$")
+
+
+def _path_match_key(path: Path | str | None) -> str:
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    try:
+        normalized = str(Path(text).resolve(strict=False))
+    except OSError:
+        normalized = str(Path(text))
+    return os.path.normcase(os.path.normpath(normalized))
 
 
 class ManifestStore:
@@ -137,6 +158,42 @@ class ManifestStore:
         del files[rel_key]
         self.save()
         return True
+
+
+def _success_entries_with_output_markdown(
+    manifest: ManifestStore,
+    output_markdown: Path,
+    exclude_rel_key: str | None = None,
+) -> list[tuple[str, dict[str, Any]]]:
+    output_markdown_key = _path_match_key(output_markdown)
+    matches: list[tuple[str, dict[str, Any]]] = []
+    for rel_key, entry in manifest.data.get("files", {}).items():
+        if rel_key == exclude_rel_key:
+            continue
+        if entry.get("status") != "success":
+            continue
+        if _path_match_key(entry.get("output_markdown")) != output_markdown_key:
+            continue
+        matches.append((rel_key, entry))
+    return matches
+
+
+def _success_entries_with_bundle_dir(
+    manifest: ManifestStore,
+    bundle_dir: Path,
+    exclude_rel_key: str | None = None,
+) -> list[tuple[str, dict[str, Any]]]:
+    bundle_dir_key = _path_match_key(bundle_dir)
+    matches: list[tuple[str, dict[str, Any]]] = []
+    for rel_key, entry in manifest.data.get("files", {}).items():
+        if rel_key == exclude_rel_key:
+            continue
+        if entry.get("status") != "success":
+            continue
+        if _path_match_key(entry.get("markdown_bundle_dir")) != bundle_dir_key:
+            continue
+        matches.append((rel_key, entry))
+    return matches
 
 
 def write_failed_pdf_report(config: dict[str, Any], manifest: ManifestStore) -> None:
@@ -302,20 +359,54 @@ def delete_pdf_artifacts(
         output_md = entry.get("output_markdown")
         if output_md:
             md_path = Path(output_md)
-            safe_unlink(md_path, md_root)
-            deleted_paths.append(str(md_path))
+            other_md_refs = _success_entries_with_output_markdown(
+                manifest, md_path, exclude_rel_key=rel_key,
+            )
+            if other_md_refs:
+                logger.info(
+                    "Keeping shared supporting markdown for %s; still referenced by %s",
+                    rel_key,
+                    [other_rel_key for other_rel_key, _entry in other_md_refs],
+                )
+            else:
+                safe_unlink(md_path, md_root)
+                deleted_paths.append(str(md_path))
 
-            assets_dir = md_path.with_name(md_path.stem + "_assets")
-            if assets_dir.exists():
-                safe_rmtree(assets_dir, md_root)
-                deleted_paths.append(str(assets_dir))
+                assets_dir = md_path.with_name(md_path.stem + "_assets")
+                if assets_dir.exists():
+                    safe_rmtree(assets_dir, md_root)
+                    deleted_paths.append(str(assets_dir))
     else:
         bundle_dir = entry.get("markdown_bundle_dir")
         if bundle_dir:
             bundle_path = Path(bundle_dir)
             if bundle_path.exists():
-                safe_rmtree(bundle_path, md_root)
-                deleted_paths.append(str(bundle_path))
+                other_main_md_refs: list[tuple[str, dict[str, Any]]] = []
+                output_md = entry.get("output_markdown")
+                if output_md:
+                    other_main_md_refs = _success_entries_with_output_markdown(
+                        manifest, Path(output_md), exclude_rel_key=rel_key,
+                    )
+                other_bundle_refs = _success_entries_with_bundle_dir(
+                    manifest, bundle_path, exclude_rel_key=rel_key,
+                )
+                if other_main_md_refs:
+                    logger.info(
+                        "Keeping shared primary bundle for %s; still referenced by %s",
+                        rel_key,
+                        [other_rel_key for other_rel_key, _entry in other_main_md_refs],
+                    )
+                elif other_bundle_refs:
+                    remove_primary_bundle_content(bundle_path, md_root)
+                    deleted_paths.append(str(bundle_path))
+                    logger.info(
+                        "Removed primary bundle content for %s but kept shared bundle for %s",
+                        rel_key,
+                        [other_rel_key for other_rel_key, _entry in other_bundle_refs],
+                    )
+                else:
+                    safe_rmtree(bundle_path, md_root)
+                    deleted_paths.append(str(bundle_path))
 
     manifest.remove_entry(rel_key)
     logger.info("Deleted artifacts for %s: %s", rel_key, deleted_paths)
@@ -361,6 +452,470 @@ def looks_like_supporting_markdown(markdown_path: Path) -> bool:
     lead_text = markdown_path.read_text(encoding="utf-8", errors="replace")[:4000].lower()
     normalized_text = re.sub(r"[^0-9a-z]+", "", lead_text)
     return SUPPORTING_CONTENT_MARKER in normalized_text
+
+
+def _normalize_markdown_for_dedupe(markdown_path: Path) -> str:
+    _metadata, body = parse_frontmatter(markdown_path)
+    body = body.lstrip("\ufeff").lstrip()
+    if body[:12].lower() == "## full text":
+        body = body[12:].lstrip(" \t\r\n#")
+    return re.sub(r"[^0-9a-z]+", "", body.lower())
+
+
+def _markdowns_are_near_duplicates(
+    path_a: Path,
+    path_b: Path,
+    normalized_cache: dict[Path, str],
+) -> bool:
+    text_a = normalized_cache.setdefault(path_a, _normalize_markdown_for_dedupe(path_a))
+    text_b = normalized_cache.setdefault(path_b, _normalize_markdown_for_dedupe(path_b))
+
+    if not text_a or not text_b:
+        return False
+
+    min_len = min(len(text_a), len(text_b))
+    max_len = max(len(text_a), len(text_b))
+    if min_len < DUPLICATE_MARKDOWN_MIN_NORMALIZED_LEN:
+        return False
+    if min_len / max_len < DUPLICATE_MARKDOWN_MIN_LENGTH_RATIO:
+        return False
+    if text_a == text_b:
+        return True
+
+    length_delta_limit = max(
+        DUPLICATE_MARKDOWN_MAX_CHAR_DELTA,
+        int(max_len * (1 - DUPLICATE_MARKDOWN_MIN_LENGTH_RATIO)),
+    )
+    if text_a in text_b or text_b in text_a:
+        return max_len - min_len <= length_delta_limit
+
+    similarity = max(
+        SequenceMatcher(None, text_a, text_b, autojunk=False).ratio(),
+        SequenceMatcher(None, text_b, text_a, autojunk=False).ratio(),
+    )
+    return similarity >= DUPLICATE_MARKDOWN_SIMILARITY_THRESHOLD
+
+
+def _supporting_markdown_sort_key(markdown_path: Path) -> tuple[int, str]:
+    match = SUPPORTING_MARKDOWN_FILE_RE.fullmatch(markdown_path.name)
+    if not match:
+        return 10**9, markdown_path.name.lower()
+
+    index_text = match.group("index")
+    index = 1 if index_text is None else int(index_text)
+    return index, markdown_path.name.lower()
+
+
+def _repoint_manifest_output_markdown(
+    manifest: ManifestStore,
+    old_markdown_path: Path,
+    canonical_markdown_path: Path,
+) -> list[str]:
+    canonical_markdown_str = str(canonical_markdown_path)
+    old_markdown_key = _path_match_key(old_markdown_path)
+    updated_rel_keys: list[str] = []
+
+    for rel_key, entry in manifest.data.get("files", {}).items():
+        if entry.get("status") != "success":
+            continue
+        if _path_match_key(entry.get("output_markdown")) != old_markdown_key:
+            continue
+        entry["output_markdown"] = canonical_markdown_str
+        entry["markdown_bundle_dir"] = str(canonical_markdown_path.parent)
+        updated_rel_keys.append(rel_key)
+
+    if updated_rel_keys:
+        manifest.save()
+    return updated_rel_keys
+
+
+def _remove_supporting_markdown_artifacts(markdown_path: Path, config: dict[str, Any]) -> None:
+    safe_unlink(markdown_path, markdown_root(config))
+    assets_dir = markdown_path.with_name(markdown_path.stem + "_assets")
+    if assets_dir.exists():
+        safe_rmtree(assets_dir, markdown_root(config))
+
+
+def dedupe_supporting_markdown_bundle(
+    bundle_dir: Path,
+    current_markdown_path: Path,
+    config: dict[str, Any],
+    manifest: ManifestStore,
+    logger,
+) -> Path:
+    supporting_paths = sorted(
+        (
+            path
+            for path in bundle_dir.iterdir()
+            if path.is_file() and SUPPORTING_MARKDOWN_FILE_RE.fullmatch(path.name)
+        ),
+        key=_supporting_markdown_sort_key,
+    )
+    if len(supporting_paths) < 2:
+        return current_markdown_path
+
+    normalized_cache: dict[Path, str] = {}
+    canonical_paths: list[Path] = []
+    duplicate_pairs: list[tuple[Path, Path]] = []
+
+    for markdown_path in supporting_paths:
+        matched_canonical: Path | None = None
+        for canonical_path in canonical_paths:
+            if _markdowns_are_near_duplicates(markdown_path, canonical_path, normalized_cache):
+                matched_canonical = canonical_path
+                break
+        if matched_canonical is None:
+            canonical_paths.append(markdown_path)
+            continue
+        duplicate_pairs.append((markdown_path, matched_canonical))
+
+    canonical_for_current = current_markdown_path
+    for duplicate_path, canonical_path in duplicate_pairs:
+        updated_rel_keys = _repoint_manifest_output_markdown(
+            manifest, duplicate_path, canonical_path,
+        )
+        _remove_supporting_markdown_artifacts(duplicate_path, config)
+        logger.info(
+            "Removed duplicate supporting markdown: %s -> keep %s%s",
+            duplicate_path,
+            canonical_path,
+            f" (updated manifest: {updated_rel_keys})" if updated_rel_keys else "",
+        )
+        if duplicate_path == current_markdown_path:
+            canonical_for_current = canonical_path
+
+    return canonical_for_current
+
+
+def _iter_supporting_markdown_paths(bundle_dir: Path) -> list[Path]:
+    return sorted(
+        (
+            path
+            for path in bundle_dir.iterdir()
+            if path.is_file() and SUPPORTING_MARKDOWN_FILE_RE.fullmatch(path.name)
+        ),
+        key=_supporting_markdown_sort_key,
+    )
+
+
+def _find_main_markdown_in_bundle(bundle_dir: Path, expected_stem: str) -> Path | None:
+    expected = bundle_dir / f"{expected_stem}.md"
+    if expected.exists():
+        return expected
+
+    candidates = [
+        path
+        for path in bundle_dir.glob("*.md")
+        if path.is_file() and not SUPPORTING_MARKDOWN_FILE_RE.fullmatch(path.name)
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_size)
+
+
+def _next_available_supporting_index(bundle_dir: Path) -> int:
+    index = 1
+    while True:
+        if not (bundle_dir / supporting_markdown_name(index)).exists() and not (
+            bundle_dir / supporting_assets_dir_name(index)
+        ).exists():
+            return index
+        index += 1
+
+
+def _repoint_manifest_primary_markdown(
+    manifest: ManifestStore,
+    old_markdown_path: Path,
+    canonical_markdown_path: Path,
+    canonical_source_pdf: Path,
+    input_root: Path,
+    config: dict[str, Any] | None = None,
+    logger=None,
+) -> list[str]:
+    canonical_markdown_str = str(canonical_markdown_path)
+    old_markdown_key = _path_match_key(old_markdown_path)
+    canonical_source_pdf_str = to_posix_path_str(canonical_source_pdf)
+    canonical_source_relpath = to_posix_path_str(relative_pdf_path(canonical_source_pdf, input_root))
+    updated_rel_keys: list[str] = []
+
+    for rel_key, entry in manifest.data.get("files", {}).items():
+        if entry.get("status") != "success":
+            continue
+        if _path_match_key(entry.get("output_markdown")) != old_markdown_key:
+            continue
+        if entry.get("document_role") == "supporting":
+            continue
+
+        old_mirror_paths = list(entry.get("mirror_paths", []))
+        if old_mirror_paths and config is not None and logger is not None:
+            remove_collection_mirrors(old_mirror_paths, config, logger)
+
+        entry["output_markdown"] = canonical_markdown_str
+        entry["markdown_bundle_dir"] = str(canonical_markdown_path.parent)
+        entry["document_role"] = "main"
+        entry["canonical_source_pdf"] = canonical_source_pdf_str
+        entry["canonical_source_relpath"] = canonical_source_relpath
+        entry["canonical_source_filename"] = canonical_source_pdf.name
+        entry["mirror_paths"] = []
+        for field in [
+            "supporting_index",
+            "primary_source_pdf",
+            "primary_source_relpath",
+            "primary_source_filename",
+        ]:
+            entry.pop(field, None)
+        updated_rel_keys.append(rel_key)
+
+    if updated_rel_keys:
+        manifest.save()
+    return updated_rel_keys
+
+
+def _merge_supporting_artifacts_into_bundle(
+    source_bundle_dir: Path,
+    target_bundle_dir: Path,
+    config: dict[str, Any],
+    manifest: ManifestStore,
+    logger,
+) -> None:
+    if source_bundle_dir == target_bundle_dir or not source_bundle_dir.exists():
+        return
+
+    normalized_cache: dict[Path, str] = {}
+    moved_targets: list[Path] = []
+
+    for source_md in _iter_supporting_markdown_paths(source_bundle_dir):
+        target_supporting_paths = _iter_supporting_markdown_paths(target_bundle_dir)
+        matched_target: Path | None = None
+        for target_md in target_supporting_paths:
+            if _markdowns_are_near_duplicates(source_md, target_md, normalized_cache):
+                matched_target = target_md
+                break
+
+        if matched_target is not None:
+            updated_rel_keys = _repoint_manifest_output_markdown(
+                manifest, source_md, matched_target,
+            )
+            _remove_supporting_markdown_artifacts(source_md, config)
+            logger.info(
+                "Merged duplicate supporting markdown from duplicate primary bundle: %s -> %s%s",
+                source_md,
+                matched_target,
+                f" (updated manifest: {updated_rel_keys})" if updated_rel_keys else "",
+            )
+            continue
+
+        target_index = _next_available_supporting_index(target_bundle_dir)
+        target_md = target_bundle_dir / supporting_markdown_name(target_index)
+        source_assets = source_md.with_name(source_md.stem + "_assets")
+        target_assets = target_bundle_dir / supporting_assets_dir_name(target_index)
+
+        source_md.rename(target_md)
+        if source_assets.exists():
+            source_assets.rename(target_assets)
+
+        updated_rel_keys = _repoint_manifest_output_markdown(
+            manifest, source_md, target_md,
+        )
+        moved_targets.append(target_md)
+        logger.info(
+            "Moved supporting markdown into canonical primary bundle: %s -> %s%s",
+            source_md,
+            target_md,
+            f" (updated manifest: {updated_rel_keys})" if updated_rel_keys else "",
+        )
+
+    if moved_targets:
+        dedupe_supporting_markdown_bundle(
+            target_bundle_dir,
+            moved_targets[-1],
+            config,
+            manifest,
+            logger,
+        )
+
+
+def dedupe_primary_markdown_bundle(
+    current_pdf: Path,
+    current_markdown_path: Path,
+    input_root: Path,
+    config: dict[str, Any],
+    manifest: ManifestStore,
+    logger,
+) -> tuple[Path, Path]:
+    duplicate_group_pdfs = main_duplicate_group_pdfs(current_pdf)
+    if len(duplicate_group_pdfs) < 2:
+        return current_markdown_path, current_pdf
+
+    group_order = {pdf.resolve(): index for index, pdf in enumerate(duplicate_group_pdfs)}
+    normalized_cache: dict[Path, str] = {}
+    available_main_markdowns: list[tuple[Path, Path]] = []
+
+    for group_pdf in duplicate_group_pdfs:
+        if group_pdf == current_pdf:
+            available_main_markdowns.append((group_pdf, current_markdown_path))
+            continue
+
+        bundle_dir = bundle_dir_for_pdf(group_pdf, input_root, config)
+        if not bundle_dir.exists():
+            continue
+        group_md = _find_main_markdown_in_bundle(bundle_dir, group_pdf.stem)
+        if group_md is None or not group_md.exists():
+            continue
+        available_main_markdowns.append((group_pdf, group_md))
+
+    if len(available_main_markdowns) < 2:
+        return current_markdown_path, current_pdf
+
+    duplicate_group: list[tuple[Path, Path]] = [(current_pdf, current_markdown_path)]
+    for group_pdf, group_md in available_main_markdowns:
+        if group_pdf == current_pdf:
+            continue
+        if _markdowns_are_near_duplicates(current_markdown_path, group_md, normalized_cache):
+            duplicate_group.append((group_pdf, group_md))
+
+    if len(duplicate_group) < 2:
+        return current_markdown_path, current_pdf
+
+    canonical_pdf, canonical_md = min(
+        duplicate_group,
+        key=lambda item: (
+            group_order.get(item[0].resolve(), 10**9),
+            len(item[0].stem),
+            item[0].name.lower(),
+        ),
+    )
+    canonical_bundle_dir = canonical_md.parent
+
+    for duplicate_pdf, duplicate_md in duplicate_group:
+        if duplicate_pdf == canonical_pdf and duplicate_md == canonical_md:
+            continue
+
+        duplicate_bundle_dir = duplicate_md.parent
+        _merge_supporting_artifacts_into_bundle(
+            duplicate_bundle_dir, canonical_bundle_dir, config, manifest, logger,
+        )
+        updated_rel_keys = _repoint_manifest_primary_markdown(
+            manifest,
+            duplicate_md,
+            canonical_md,
+            canonical_pdf,
+            input_root,
+            config=config,
+            logger=logger,
+        )
+
+        if duplicate_bundle_dir.exists() and duplicate_bundle_dir != canonical_bundle_dir:
+            remove_primary_bundle_content(duplicate_bundle_dir, markdown_root(config))
+            if duplicate_bundle_dir.exists() and not any(duplicate_bundle_dir.iterdir()):
+                duplicate_bundle_dir.rmdir()
+
+        logger.info(
+            "Merged duplicate primary markdown bundle: %s -> keep %s%s",
+            duplicate_bundle_dir,
+            canonical_bundle_dir,
+            f" (updated manifest: {updated_rel_keys})" if updated_rel_keys else "",
+        )
+
+    return canonical_md, canonical_pdf
+
+
+def output_markdown_matches_current_layout(
+    pdf_path: Path,
+    input_root: Path,
+    config: dict[str, Any],
+    manifest_entry: dict[str, Any] | None,
+) -> bool:
+    if not manifest_entry or manifest_entry.get("status") != "success":
+        return False
+
+    output_markdown_str = str(manifest_entry.get("output_markdown", "")).strip()
+    if not output_markdown_str:
+        return False
+
+    output_markdown_path = Path(output_markdown_str)
+    if not output_markdown_path.exists():
+        return False
+    output_markdown_key = _path_match_key(output_markdown_path)
+
+    supporting_info = supporting_source_info(pdf_path)
+    if supporting_info:
+        primary_pdf, _supporting_index = supporting_info
+        primary_bundle_dir = bundle_dir_for_pdf(primary_pdf, input_root, config)
+        return (
+            _path_match_key(output_markdown_path.parent) == _path_match_key(primary_bundle_dir)
+            and SUPPORTING_MARKDOWN_FILE_RE.fullmatch(output_markdown_path.name) is not None
+        )
+
+    expected_main_md = bundle_dir_for_pdf(pdf_path, input_root, config) / f"{pdf_path.stem}.md"
+    if output_markdown_key == _path_match_key(expected_main_md):
+        return True
+
+    canonical_source_pdf = str(manifest_entry.get("canonical_source_pdf", "")).strip()
+    if not canonical_source_pdf:
+        return False
+
+    canonical_pdf = Path(canonical_source_pdf)
+    canonical_main_md = (
+        bundle_dir_for_pdf(canonical_pdf, input_root, config) / f"{canonical_pdf.stem}.md"
+    )
+    return output_markdown_key == _path_match_key(canonical_main_md)
+
+
+def cleanup_standalone_supporting_bundle(
+    pdf_path: Path,
+    primary_pdf: Path,
+    input_root: Path,
+    config: dict[str, Any],
+    logger=None,
+) -> bool:
+    standalone_bundle_dir = bundle_dir_for_pdf(pdf_path, input_root, config)
+    primary_bundle_dir = bundle_dir_for_pdf(primary_pdf, input_root, config)
+    if standalone_bundle_dir == primary_bundle_dir or not standalone_bundle_dir.exists():
+        return False
+
+    safe_rmtree(standalone_bundle_dir, markdown_root(config))
+    if logger is not None:
+        logger.info(
+            "Removed standalone supporting bundle after merging into primary bundle: %s -> %s",
+            standalone_bundle_dir,
+            primary_bundle_dir,
+        )
+    return True
+
+
+def build_manifest_runtime_metadata(
+    pdf_path: Path,
+    input_root: Path,
+    final_md: Path,
+    mirror_paths: list[str],
+    config: dict[str, Any],
+    canonical_source_pdf: Path | None = None,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "torch_device": config.get("torch_device", "cuda"),
+        "force_ocr": bool(config.get("force_ocr", False)),
+        "markdown_bundle_dir": str(final_md.parent),
+        "mirror_paths": mirror_paths,
+    }
+
+    supporting_info = supporting_source_info(pdf_path)
+    if supporting_info and SUPPORTING_MARKDOWN_FILE_RE.fullmatch(final_md.name):
+        primary_pdf, supporting_index = supporting_info
+        metadata["document_role"] = "supporting"
+        metadata["supporting_index"] = supporting_index
+        metadata["primary_source_pdf"] = to_posix_path_str(primary_pdf)
+        metadata["primary_source_relpath"] = to_posix_path_str(relative_pdf_path(primary_pdf, input_root))
+        metadata["primary_source_filename"] = primary_pdf.name
+        return metadata
+
+    metadata["document_role"] = "main"
+    if canonical_source_pdf is not None and canonical_source_pdf != pdf_path:
+        metadata["canonical_source_pdf"] = to_posix_path_str(canonical_source_pdf)
+        metadata["canonical_source_relpath"] = to_posix_path_str(relative_pdf_path(canonical_source_pdf, input_root))
+        metadata["canonical_source_filename"] = canonical_source_pdf.name
+        metadata["mirror_paths"] = []
+    return metadata
 
 
 def remove_primary_bundle_content(bundle_dir: Path, allowed_root: Path) -> None:
@@ -558,9 +1113,13 @@ def materialize_supporting_bundle(
     primary_pdf: Path,
     supporting_index: int,
     zotero_map: ZoteroCollectionMap | None = None,
+    logger=None,
 ) -> Path:
     bundle_dir = bundle_dir_for_pdf(primary_pdf, input_root, config)
     bundle_dir.mkdir(parents=True, exist_ok=True)
+    cleanup_standalone_supporting_bundle(
+        pdf_path, primary_pdf, input_root, config, logger=logger,
+    )
 
     target_md = bundle_dir / supporting_markdown_name(supporting_index)
     asset_dir = bundle_dir / supporting_assets_dir_name(supporting_index)
@@ -601,8 +1160,14 @@ def materialize_final_bundle(
 
     zotero_map = _get_zotero_map(config)
 
-    if supporting_info and looks_like_supporting_markdown(main_raw_md):
+    if supporting_info:
         primary_pdf, supporting_index = supporting_info
+        if logger is not None and not looks_like_supporting_markdown(main_raw_md):
+            logger.info(
+                "Treating PDF as supporting based on filename grouping: %s -> %s",
+                pdf_path,
+                primary_pdf,
+            )
         md_path = materialize_supporting_bundle(
             config,
             pdf_path=pdf_path,
@@ -612,6 +1177,7 @@ def materialize_final_bundle(
             primary_pdf=primary_pdf,
             supporting_index=supporting_index,
             zotero_map=zotero_map,
+            logger=logger,
         )
         return md_path, []
 
@@ -646,13 +1212,27 @@ def convert_one_pdf(
     rel_key = str(relative_pdf_path(pdf, input_root)).replace("\\", "/")
     fingerprint = pdf_fingerprint(pdf, use_sha256=config.get("compute_sha256", False))
     manifest = ManifestStore(manifest_path(config))
+    existing_entry = manifest.get(rel_key)
 
     if not force_reconvert and manifest.is_unchanged(rel_key, fingerprint):
-        logger.info("Skipping unchanged PDF: %s", rel_key)
-        existing = manifest.get(rel_key)
-        if existing:
-            return Path(existing["output_markdown"])
-        return None
+        if output_markdown_matches_current_layout(pdf, input_root, config, existing_entry):
+            supporting_info = supporting_source_info(pdf)
+            if supporting_info:
+                primary_pdf, _supporting_index = supporting_info
+                cleanup_standalone_supporting_bundle(
+                    pdf, primary_pdf, input_root, config, logger=logger,
+                )
+            logger.info("Skipping unchanged PDF: %s", rel_key)
+            if existing_entry:
+                return Path(existing_entry["output_markdown"])
+            return None
+
+        logger.info(
+            "Reprocessing unchanged PDF because markdown layout is missing or outdated: %s",
+            rel_key,
+        )
+        if existing_entry and existing_entry.get("output_markdown"):
+            logger.info("Current manifest output_markdown: %s", existing_entry["output_markdown"])
 
     raw_output_dir = raw_dir_for_pdf(pdf, input_root, config)
 
@@ -661,18 +1241,39 @@ def convert_one_pdf(
         final_md, mirror_paths = materialize_final_bundle(
             config, pdf, input_root, raw_output_dir, logger=logger,
         )
+        canonical_source_pdf = pdf
+        if SUPPORTING_MARKDOWN_FILE_RE.fullmatch(final_md.name):
+            if existing_entry and existing_entry.get("mirror_paths"):
+                remove_collection_mirrors(existing_entry["mirror_paths"], config, logger)
+            final_md = dedupe_supporting_markdown_bundle(
+                bundle_dir=final_md.parent,
+                current_markdown_path=final_md,
+                config=config,
+                manifest=manifest,
+                logger=logger,
+            )
+        else:
+            final_md, canonical_source_pdf = dedupe_primary_markdown_bundle(
+                current_pdf=pdf,
+                current_markdown_path=final_md,
+                input_root=input_root,
+                config=config,
+                manifest=manifest,
+                logger=logger,
+            )
+            if canonical_source_pdf != pdf and mirror_paths:
+                remove_collection_mirrors(mirror_paths, config, logger)
+                mirror_paths = []
         manifest.mark_success(
             rel_key=rel_key,
             fingerprint=fingerprint,
             source_pdf=pdf,
             output_markdown=final_md,
             raw_dir=raw_output_dir,
-            metadata={
-                "torch_device": config.get("torch_device", "cuda"),
-                "force_ocr": bool(config.get("force_ocr", False)),
-                "markdown_bundle_dir": str(final_md.parent),
-                "mirror_paths": mirror_paths,
-            },
+            metadata=build_manifest_runtime_metadata(
+                pdf, input_root, final_md, mirror_paths, config,
+                canonical_source_pdf=canonical_source_pdf,
+            ),
         )
         logger.info("Conversion completed: %s -> %s", rel_key, final_md)
         return final_md
