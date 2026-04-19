@@ -39,7 +39,7 @@ if ($Config.PSObject.Properties.Name -contains 'pythonw_path') {
 if ([string]::IsNullOrWhiteSpace($PythonPath) -and $Config.PSObject.Properties.Name -contains 'python_path') {
     $PythonPath = [string]$Config.python_path
 }
-$WatchScriptPath = Join-Path $WorkflowRoot 'watch_folder_resilient.py'
+$WatchScriptPath = Join-Path $WorkflowRoot 'watch.py'
 $WorkingDirectory = $WorkflowRoot
 $ModelCacheDir = ''
 if ($Config.PSObject.Properties.Name -contains 'model_cache_dir') {
@@ -116,7 +116,7 @@ function Start-Watcher {
 
     Start-Sleep -Seconds 2
     if ($process.HasExited) {
-        throw "watch_folder_resilient.py exited immediately with code $($process.ExitCode)"
+        throw "watch.py exited immediately with code $($process.ExitCode)"
     }
 
     Save-WatcherState -Process $process
