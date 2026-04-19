@@ -31,7 +31,7 @@ if (-not (Test-Path -LiteralPath $SupervisorPath)) {
 function Stop-PaperAgentWatchProcesses {
     $patterns = @(
         'paper_agent_watch_supervisor.ps1',
-        'watch_folder_resilient.py'
+        'watch.py'
     )
 
     try {

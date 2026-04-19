@@ -84,10 +84,21 @@ def _build_pdf_collection_map(
 
     mapping: dict[str, list[str]] = {}
     for raw_path, cid in cursor:
-        # Strip the "storage:" prefix if present
+        # Extract the filename from various Zotero path formats:
+        #   - "storage:filename.pdf"       (managed storage)
+        #   - "attachments:filename.pdf"   (linked attachment, relative)
+        #   - "D:\path\to\filename.pdf"    (linked attachment, absolute Windows)
+        #   - "/path/to/filename.pdf"      (linked attachment, absolute Unix)
         filename = raw_path
-        if filename.startswith("storage:"):
-            filename = filename[len("storage:"):]
+        for prefix in ("storage:", "attachments:"):
+            if filename.startswith(prefix):
+                filename = filename[len(prefix):]
+                break
+
+        # For linked attachments with full paths, extract just the filename
+        # Handle both Windows backslash and Unix forward slash
+        if "\\" in filename or "/" in filename:
+            filename = filename.replace("\\", "/").rsplit("/", 1)[-1]
 
         # Only keep PDF attachments
         if not filename.lower().endswith(".pdf"):

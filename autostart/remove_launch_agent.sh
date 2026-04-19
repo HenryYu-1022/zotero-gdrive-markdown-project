@@ -12,7 +12,7 @@ PLIST_PATH="$HOME/Library/LaunchAgents/$LABEL.plist"
 stop_project_processes() {
   local patterns=(
     "$SUPERVISOR_PATH"
-    "$WORKFLOW_ROOT/watch_folder_resilient.py"
+    "$WORKFLOW_ROOT/watch.py"
   )
 
   local pattern

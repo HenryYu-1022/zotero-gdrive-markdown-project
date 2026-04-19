@@ -7,7 +7,7 @@ PROJECT_ROOT="${SCRIPT_DIR:h}"
 SUPERVISOR_PATH="$SCRIPT_DIR/paper_agent_watch_supervisor.sh"
 WORKFLOW_ROOT="$PROJECT_ROOT/paper_to_markdown"
 CONFIG_PATH="$WORKFLOW_ROOT/settings.json"
-WATCH_SCRIPT_PATH="$WORKFLOW_ROOT/watch_folder_resilient.py"
+WATCH_SCRIPT_PATH="$WORKFLOW_ROOT/watch.py"
 
 read_json_key() {
   /usr/bin/plutil -extract "$1" raw -o - "$CONFIG_PATH" 2>/dev/null || true
@@ -96,7 +96,7 @@ start_watcher() {
   if ! pid_is_running "$pid"; then
     local exit_code=1
     wait "$pid" || exit_code=$?
-    log "watch_folder_resilient.py exited immediately with code $exit_code" "ERROR"
+    log "watch.py exited immediately with code $exit_code" "ERROR"
     return 1
   fi
 

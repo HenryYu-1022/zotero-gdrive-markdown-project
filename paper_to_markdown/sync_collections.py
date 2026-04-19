@@ -7,16 +7,16 @@ updates YAML frontmatter and symlink mirrors when changes are detected.
 Usage::
 
     # One-shot sync
-    python3 sync_zotero_collections.py --once
+    python3 sync_collections.py --once
 
     # Continuous daemon (default interval: 60s)
-    python3 sync_zotero_collections.py
+    python3 sync_collections.py
 
     # Custom interval
-    python3 sync_zotero_collections.py --interval 30
+    python3 sync_collections.py --interval 30
 
     # Custom config file
-    python3 sync_zotero_collections.py --config /path/to/settings.json
+    python3 sync_collections.py --config /path/to/settings.json
 """
 
 from __future__ import annotations
@@ -298,7 +298,7 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_config(args.config)
-    logger = setup_logger(config, logger_name="sync_zotero_collections")
+    logger = setup_logger(config, logger_name="sync_collections")
 
     if not config.get("zotero_db_path"):
         logger.error(
