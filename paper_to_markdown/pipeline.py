@@ -95,6 +95,76 @@ def _path_match_key(path: Path | str | None) -> str:
     return os.path.normcase(os.path.normpath(normalized))
 
 
+def _normalized_stem_key(stem: str) -> str:
+    """Match already-converted papers even after Zotero/Drive path moves.
+
+    Google Drive can change mtimes and Zotero can move PDFs between collection
+    folders.  For the non-force path we treat an existing Markdown with the
+    same normalized paper title as sufficient evidence that the PDF has already
+    been converted.
+    """
+    base_stem = re.sub(r"(?:[\s_-]+[1-9]\d*)$", "", stem)
+    return re.sub(r"[^0-9a-z]+", "", base_stem.lower())
+
+
+def _build_markdown_stem_index(config: dict[str, Any]) -> dict[str, Path]:
+    stem_index: dict[str, Path] = {}
+    md_root = markdown_root(config)
+    if not md_root.exists():
+        return stem_index
+
+    for markdown_path in sorted(md_root.rglob("*.md")):
+        if not markdown_path.is_file():
+            continue
+        key = _normalized_stem_key(markdown_path.stem)
+        if key and key not in stem_index:
+            stem_index[key] = markdown_path
+    return stem_index
+
+
+def _existing_main_markdown_by_stem(
+    pdf_path: Path,
+    config: dict[str, Any],
+    markdown_stem_index: dict[str, Path] | None = None,
+) -> Path | None:
+    stem_index = markdown_stem_index if markdown_stem_index is not None else _build_markdown_stem_index(config)
+    return stem_index.get(_normalized_stem_key(pdf_path.stem))
+
+
+def _expected_output_markdown_for_pdf(
+    pdf_path: Path,
+    input_root: Path,
+    config: dict[str, Any],
+) -> Path:
+    supporting_info = supporting_source_info(pdf_path)
+    if supporting_info:
+        primary_pdf, supporting_index = supporting_info
+        return bundle_dir_for_pdf(primary_pdf, input_root, config) / supporting_markdown_name(supporting_index)
+    return bundle_dir_for_pdf(pdf_path, input_root, config) / f"{pdf_path.stem}.md"
+
+
+def existing_markdown_for_pdf(
+    pdf_path: Path,
+    input_root: Path,
+    config: dict[str, Any],
+    manifest_entry: dict[str, Any] | None = None,
+    markdown_stem_index: dict[str, Path] | None = None,
+) -> Path | None:
+    if output_markdown_matches_current_layout(pdf_path, input_root, config, manifest_entry):
+        output_markdown = str(manifest_entry.get("output_markdown", "")) if manifest_entry else ""
+        if output_markdown:
+            return Path(output_markdown)
+
+    expected_markdown = _expected_output_markdown_for_pdf(pdf_path, input_root, config)
+    if expected_markdown.exists():
+        return expected_markdown
+
+    if supporting_source_info(pdf_path):
+        return None
+
+    return _existing_main_markdown_by_stem(pdf_path, config, markdown_stem_index)
+
+
 class ManifestStore(FrontmatterIndex):
     """Backward-compatible name for the frontmatter-backed state index."""
 
@@ -1134,6 +1204,16 @@ def materialize_supporting_bundle(
     logger=None,
 ) -> Path:
     bundle_dir = bundle_dir_for_pdf(primary_pdf, input_root, config)
+    if bundle_dir.exists() and not bundle_dir.is_dir():
+        existing_primary_markdown = _existing_main_markdown_by_stem(primary_pdf, config)
+        if existing_primary_markdown is not None and existing_primary_markdown.parent.exists():
+            if logger is not None:
+                logger.info(
+                    "Using existing primary bundle for supporting PDF because target path is not a directory: %s -> %s",
+                    bundle_dir,
+                    existing_primary_markdown.parent,
+                )
+            bundle_dir = existing_primary_markdown.parent
     bundle_dir.mkdir(parents=True, exist_ok=True)
     cleanup_standalone_supporting_bundle(
         pdf_path, primary_pdf, input_root, config, logger=logger,
@@ -1232,19 +1312,19 @@ def convert_one_pdf(
     manifest = ManifestStore(config)
     existing_entry = manifest.get(rel_key)
 
-    if not force_reconvert and manifest.is_unchanged(rel_key, fingerprint):
-        if output_markdown_matches_current_layout(pdf, input_root, config, existing_entry):
+    if not force_reconvert:
+        existing_markdown = existing_markdown_for_pdf(pdf, input_root, config, existing_entry)
+        if existing_markdown is not None:
             supporting_info = supporting_source_info(pdf)
             if supporting_info:
                 primary_pdf, _supporting_index = supporting_info
                 cleanup_standalone_supporting_bundle(
                     pdf, primary_pdf, input_root, config, logger=logger,
                 )
-            logger.info("Skipping unchanged PDF: %s", rel_key)
-            if existing_entry:
-                return Path(existing_entry["output_markdown"])
-            return None
+            logger.info("Skipping existing Markdown PDF: %s -> %s", rel_key, existing_markdown)
+            return existing_markdown
 
+    if not force_reconvert and manifest.is_unchanged(rel_key, fingerprint):
         logger.info(
             "Reprocessing unchanged PDF because markdown layout is missing or outdated: %s",
             rel_key,
@@ -1359,20 +1439,36 @@ def convert_all_pdfs(
     failure_errors: dict[Path, str] = {}
 
     manifest = ManifestStore(config)
+    markdown_stem_index = _build_markdown_stem_index(config)
 
     # ── First pass ──────────────────────────────────────────────────────
     for pdf in pdfs:
         rel_key = str(relative_pdf_path(pdf, input_root)).replace("\\", "/")
         fingerprint = pdf_fingerprint(pdf, use_sha256=config.get("compute_sha256", True))
+        existing_entry = manifest.get(rel_key)
+        if not force_reconvert:
+            existing_markdown = existing_markdown_for_pdf(
+                pdf,
+                input_root,
+                config,
+                existing_entry,
+                markdown_stem_index=markdown_stem_index,
+            )
+            if existing_markdown is not None:
+                logger.info("Skipping existing Markdown PDF: %s -> %s", rel_key, existing_markdown)
+                skipped += 1
+                continue
+
         if not force_reconvert and manifest.is_unchanged(rel_key, fingerprint):
-            logger.info("Skipping unchanged PDF: %s", rel_key)
+            logger.info("Skipping unchanged PDF without current Markdown match: %s", rel_key)
             skipped += 1
             continue
 
         try:
-            convert_one_pdf(pdf, config_path=config_path, force_reconvert=True)
+            convert_one_pdf(pdf, config_path=config_path, force_reconvert=force_reconvert)
             converted += 1
             manifest = ManifestStore(config)
+            markdown_stem_index = _build_markdown_stem_index(config)
         except Exception as exc:
             failed_pdfs.append(pdf)
             failure_errors[pdf] = str(exc)

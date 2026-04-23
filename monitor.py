@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import re
 import time
 from dataclasses import dataclass, field
@@ -16,10 +17,18 @@ LOG_LINE_RE = re.compile(
     r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \| (?P<level>[^|]+) \| (?P<message>.*)$"
 )
 DISCOVERED_RE = re.compile(r"^PDFs discovered: (?P<count>\d+)$")
-SKIPPED_RE = re.compile(r"^Skipping unchanged PDF: (?P<path>.+)$")
+SKIPPED_RE = re.compile(
+    r"^Skipping (?:unchanged PDF|existing Markdown PDF|unchanged PDF without current Markdown match): "
+    r"(?P<path>.+?)(?: -> .+)?$"
+)
 START_RE = re.compile(r"^Starting marker conversion: (?P<path>.+)$")
 COMPLETED_RE = re.compile(r"^Conversion completed: (?P<source>.+?) -> (?P<output>.+)$")
 FAILED_RE = re.compile(r"^Conversion failed: (?P<source>.+)$")
+RETRY_FAILED_RE = re.compile(
+    r"^Retry attempt (?P<attempt>\d+)/(?P<max>\d+) failed for: (?P<source>.+)$"
+)
+WATCHER_FINAL_FAILED_RE = re.compile(r"^Watcher conversion failed after all retries: (?P<source>.+)$")
+FINAL_FAILED_LIST_RE = re.compile(r"^PDFs that failed after all retries \((?P<max>\d+)\): (?P<paths>.+)$")
 FINISHED_RE = re.compile(
     r"^Batch finished: converted=(?P<converted>\d+) skipped=(?P<skipped>\d+) failed=(?P<failed>\d+)$"
 )
@@ -36,6 +45,7 @@ class BatchProgress:
     current_started_at: datetime | None = None
     current_elapsed_seconds: float = 0.0
     durations_seconds: list[float] = field(default_factory=list)
+    final_failed_pdfs: list[str] = field(default_factory=list)
     finished_at: datetime | None = None
 
     @property
@@ -67,6 +77,11 @@ class BatchProgress:
         if self.current_pdf:
             eta += max(average - self.current_elapsed_seconds, 0.0)
         return max(eta, 0.0)
+
+    def record_final_failure(self, source: str) -> None:
+        if source not in self.final_failed_pdfs:
+            self.final_failed_pdfs.append(source)
+        self.failed = len(self.final_failed_pdfs)
 
 
 def parse_timestamp(raw: str) -> datetime:
@@ -142,7 +157,6 @@ def parse_latest_batch(config: dict[str, Any]) -> BatchProgress | None:
             continue
 
         if FAILED_RE.match(message):
-            latest_batch.failed += 1
             if latest_batch.current_started_at is not None:
                 latest_batch.durations_seconds.append(
                     max((timestamp - latest_batch.current_started_at).total_seconds(), 0.0)
@@ -152,7 +166,31 @@ def parse_latest_batch(config: dict[str, Any]) -> BatchProgress | None:
             latest_batch.current_elapsed_seconds = 0.0
             continue
 
-        if FINISHED_RE.match(message):
+        retry_failed_match = RETRY_FAILED_RE.match(message)
+        if retry_failed_match:
+            if retry_failed_match.group("attempt") == retry_failed_match.group("max"):
+                latest_batch.record_final_failure(retry_failed_match.group("source"))
+            continue
+
+        watcher_final_failed_match = WATCHER_FINAL_FAILED_RE.match(message)
+        if watcher_final_failed_match:
+            latest_batch.record_final_failure(watcher_final_failed_match.group("source"))
+            continue
+
+        final_failed_list_match = FINAL_FAILED_LIST_RE.match(message)
+        if final_failed_list_match:
+            try:
+                paths = ast.literal_eval(final_failed_list_match.group("paths"))
+            except (SyntaxError, ValueError):
+                paths = []
+            if isinstance(paths, list):
+                for path in paths:
+                    latest_batch.record_final_failure(str(path))
+            continue
+
+        finished_match = FINISHED_RE.match(message)
+        if finished_match:
+            latest_batch.failed = max(latest_batch.failed, int(finished_match.group("failed")))
             latest_batch.finished_at = timestamp
 
     if latest_batch and latest_batch.current_started_at is not None:
@@ -226,7 +264,7 @@ def build_report(config_path: str | None = None) -> str:
             f"Batch discovered: {latest_batch.discovered}",
             f"Batch skipped: {latest_batch.skipped}",
             f"Batch converted: {latest_batch.converted}",
-            f"Batch failed: {latest_batch.failed}",
+            f"Batch failed after retries: {latest_batch.failed}",
             f"Batch in progress: {latest_batch.in_progress}",
             f"Batch remaining: {latest_batch.remaining}",
         ]
@@ -257,6 +295,9 @@ def build_report(config_path: str | None = None) -> str:
     lines.append(f"Batch finished: {'yes' if latest_batch.finished_at else 'no'}")
     if latest_batch.finished_at:
         lines.append(f"Finished at: {latest_batch.finished_at:%Y-%m-%d %H:%M:%S}")
+    if latest_batch.final_failed_pdfs:
+        lines.append("Failed PDFs after retries:")
+        lines.extend(f"- {path}" for path in latest_batch.final_failed_pdfs)
 
     return "\n".join(lines)
 
