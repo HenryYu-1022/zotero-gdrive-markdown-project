@@ -95,12 +95,13 @@ Set `marker_cli` to the command name (`marker_single`) or its absolute path.
 
 ### Run
 
-**Windows / single machine — convert PDFs:**
+**Windows runner / single machine — watch PDFs and convert locally:**
 
 ```bash
-cd paper_to_markdown
-python3 convert.py
+python3 -m paper_to_markdown.watch_runner
 ```
+
+For a one-shot full scan, you can still use `cd paper_to_markdown && python3 convert.py`.
 
 **Mac controller — scan for orphaned Markdown and delete them when their PDF is gone:**
 
@@ -232,6 +233,7 @@ zotero_collections:    # only when zotero_db_path is configured
 | What you want to do | Command |
 |---|---|
 | Convert all PDFs once | `cd paper_to_markdown && python3 convert.py` |
+| Watch PDFs and convert in realtime (runner) | `python3 -m paper_to_markdown.watch_runner` |
 | Convert a single PDF | `python3 convert.py --path "/path/to/Paper.pdf"` |
 | Force reconvert everything | `python3 convert.py --force` |
 | Test with first N files | `python3 convert.py --limit 5` |
@@ -281,6 +283,9 @@ Config file: `paper_to_markdown/settings.json`
 | `collection_mirror_mode` | | `symlink` | `symlink` or `copy` |
 | `zotero_sync_interval_seconds` | | `60` | Collection sync polling interval |
 | `daemon_idle_timeout_seconds` | | `300` | Exit the plugin daemon after this many idle seconds; `0` disables |
+| `watch_initial_scan` | | `true` | Whether the runner watcher scans existing PDFs on startup |
+| `watch_stable_checks` | | `3` | Number of stable file checks before conversion |
+| `watch_stable_interval_seconds` | | `2` | Seconds between stable file checks |
 | `python_path` | | — | Absolute Python path for background startup |
 | `log_level` | | `INFO` | Logging level |
 
